@@ -3,6 +3,8 @@
 #include <psapi.h>
 #endif
 
+#include "imgui.h" // vec2
+
 struct AffineMat3 { float m[9]; };
 
 static AffineMat3 amat3_mul(const AffineMat3 &a, const AffineMat3 &b) {

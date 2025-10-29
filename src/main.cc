@@ -116,6 +116,7 @@ enum class MixType {
 
 struct Op {
   GLuint prog_id = 0;
+  bool bypass = false;
   MixType mix_type = MixType::MixNormal;
   float opacity = 1.0f;
   virtual ~Op() = default;
@@ -144,6 +145,16 @@ static GLuint make_fullscreen_program(const char* fragment_path) {
 struct OpConstColor : public Op {
   float color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
   char const* get_type_name() const override { return "const/color"; }
+
+  OpConstColor() {
+    prog_id = make_fullscreen_program("shaders/const_color.frag");
+  }
+
+  void apply(GLuint tex_id, int out_w, int out_h) override {
+    glUseProgram(prog_id);
+    glUniform4fv(glGetUniformLocation(prog_id, "uColor"), 1, color);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+  }
 };
 
 struct OpConstGradient : public Op {
@@ -151,6 +162,10 @@ struct OpConstGradient : public Op {
   float color_b[4] = {0.0f, 0.0f, 0.0f, 1.0f};
   float angle = 0.0f;
   char const* get_type_name() const override { return "const/gradient"; }
+
+  void apply(GLuint tex_id, int out_w, int out_h) override {
+    // TODO
+  }
 };
 
 struct OpGenTransform : public Op {
@@ -165,30 +180,37 @@ struct OpGenTransform : public Op {
   char const* get_type_name() const override { return "gen/transform"; }
 
   OpGenTransform() {
-    prog_id = make_fullscreen_program("shaders/transform.frag");
+    prog_id = make_fullscreen_program("shaders/gen_transform.frag");
   }
 
   void apply(GLuint tex_id, int out_w, int out_h) override {
-    const float eps = 1e-6f;
-    float sx = (fabsf(size_x) < eps) ? eps : size_x;
-    float sy = (size_uniform ? sx : ((fabsf(size_y) < eps) ? eps : size_y));
-
-    float fx = flip_horizontal ? -1.0f : 1.0f;
-    float fy = flip_vertical   ? -1.0f : 1.0f;
-
-    // AffineMat3 M = amat3_transform(0.5f, 0.5f);
-    // M = amat3_mul(M, amat3_scale(fx, fy));
-    // M = amat3_mul(M, amat3_rotate(angle));
-    // M = amat3_mul(M, amat3_transform(-0.5f, -0.5f));
-    // M = amat3_mul(M, amat3_scale(sx, sy));
-    // M = amat3_mul(M, amat3_transform(offset_x, offset_y));
-    AffineMat3 M = amat3_identity();
-
     glUseProgram(prog_id);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, tex_id);
     glUniform1i(glGetUniformLocation(prog_id, "uTex"), 0);
+
+    AffineMat3 M = amat3_identity();
+    ImVec2 pivot = {0.5f, 0.5f};
+
+    // 1) move to pivot
+    // 2) apply flip, scale, rotate
+    // 3) move back
+    // 4) finally apply UV translation (offset)
+    M = amat3_mul(M, amat3_transform(offset_x / out_w, offset_y / out_h));
+    M = amat3_mul(M, amat3_transform(+pivot.x, +pivot.y));
+    M = amat3_mul(M, amat3_rotate(angle));
+    M = amat3_mul(M, amat3_scale(
+      size_uniform ? size_x : size_x,
+      size_uniform ? size_x : size_y
+    ));
+    M = amat3_mul(M, amat3_scale(
+      flip_horizontal ? -1.f : 1.f,
+      flip_vertical   ? -1.f : 1.f
+    ));
+    M = amat3_mul(M, amat3_transform(-pivot.x, -pivot.y));
+
     glUniformMatrix3fv(glGetUniformLocation(prog_id, "uXform"), 1, GL_TRUE, M.m);
+
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
   }
 };
@@ -227,15 +249,13 @@ struct state_t {
     bool usePing = true;
     GLuint current = input_tex_id;
     for(size_t i = 0; i < ops.size(); ++i) {
+      if (ops[i]->bypass) continue;
       // dont run if op is invalid
       if (ops[i]->prog_id == 0) continue;
       FBO &dst = usePing ? ping : pong;
       glBindFramebuffer(GL_FRAMEBUFFER, dst.fbo_id);
-      glDrawBuffer(GL_COLOR_ATTACHMENT0);
-      glClearColor(0, 0, 0, 0);
-      glClear(GL_COLOR_BUFFER_BIT);
+      glViewport(0, 0, canvas_w, canvas_h);
       ops[i]->apply(current, canvas_w, canvas_h);
-      glBindFramebuffer(GL_FRAMEBUFFER, 0);
       current = dst.tex.id;
       usePing = !usePing;
     }
@@ -266,7 +286,7 @@ int main() {
   }
 
   glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-  glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
+  glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
   glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
   GLFWwindow *window = glfwCreateWindow(800, 600, "vorane", NULL, NULL);
@@ -326,7 +346,7 @@ int main() {
   g_state.pong.tex.createRGBA8(g_state.canvas_w, g_state.canvas_h);
   g_state.pong.create(g_state.canvas_w, g_state.canvas_h);
 
-  GLuint display_prog = make_fullscreen_program("shaders/transform.frag");
+  GLuint display_prog = make_fullscreen_program("shaders/present.frag");
 
   while (!glfwWindowShouldClose(window)) {
     glfwPollEvents();
@@ -402,8 +422,8 @@ int main() {
     float offy = (1.0 - hn) * 0.5f - (g_state.pan_y / (float)io.DisplaySize.y) * 2.0f;
     float zoom = g_state.zoom_factor;
 
-    float sx = wn / zoom;
-    float sy = hn / zoom;
+    float sx = wn * zoom;
+    float sy = hn * zoom;
     AffineMat3 M = amat3_identity();
     M = amat3_mul(M, amat3_transform(-offx, -offy));
     M = amat3_mul(M, amat3_scale(1.0f/sx, 1.0f/sy));
@@ -413,8 +433,10 @@ int main() {
     glUseProgram(display_prog);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, final_tex);
-    glUniform1i(glGetUniformLocation(display_prog,"uTex"), 0);
-    glUniformMatrix3fv(glGetUniformLocation(display_prog,"uXform"), 1, GL_TRUE, M.m);
+    glUniform1i(glGetUniformLocation(display_prog, "uTex"), 0);
+    glUniformMatrix3fv(glGetUniformLocation(display_prog, "uXform"), 1, GL_TRUE, M.m);
+    glUniform2f(glGetUniformLocation(display_prog, "uCanvasSize"), (float)g_state.canvas_w, (float)g_state.canvas_h);
+    glUniform1f(glGetUniformLocation(display_prog, "uCheckerSize"), 32.0f * zoom);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 
     // --- ui
@@ -529,6 +551,10 @@ int main() {
 
         if (ImGui::CollapsingHeader(header)) {
           ImGui::Indent();
+          if (ImGui::Button(format_id("bypass", i))) {
+            g_state.ops[i]->bypass = !g_state.ops[i]->bypass;
+          }
+          ImGui::SameLine();
           if (ImGui::Button(format_id("remove", i))) {
             g_state.ops.erase(g_state.ops.begin() + i);
             i--;
