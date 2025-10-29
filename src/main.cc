@@ -108,20 +108,20 @@ struct FBO {
 };
 
 enum class MixType {
-  MixNormal,
-  MixAdd,
+  MixNormal = 0,
   MixMultiply,
+  MixScreen,
   MixOverlay,
-};
-
-struct Op {
-  GLuint prog_id = 0;
-  bool bypass = false;
-  MixType mix_type = MixType::MixNormal;
-  float opacity = 1.0f;
-  virtual ~Op() = default;
-  virtual char const* get_type_name() const = 0;
-  virtual void apply(GLuint tex_id, int out_w, int out_h) {}
+  MixSoftLight,
+  MixHardLight,
+  MixColorDodge,
+  MixColorBurn,
+  MixLinearDodge,
+  MixLinearBurn,
+  MixLighten,
+  MixDarken,
+  MixDifference,
+  MixExclusion
 };
 
 static GLuint make_fullscreen_program(const char* fragment_path) {
@@ -142,29 +142,76 @@ static GLuint make_fullscreen_program(const char* fragment_path) {
   }
 }
 
+struct Op {
+  GLuint prog_id = 0;
+  bool bypass = false;
+
+  // composition-related fields
+  GLuint prog_composite_id = 0; // program used for compositing
+  FBO layer_fbo; // op result stored here
+  MixType mix_type = MixType::MixNormal;
+  float opacity = 1.0f;
+
+  // call this after Op*()
+  void init() {
+    prog_composite_id = make_fullscreen_program("shaders/composite.frag");
+  }
+
+  // call this before applying the op
+  void ensure_layer_fbo(int w, int h) {
+    if (layer_fbo.tex.id == 0 || layer_fbo.tex.w != w || layer_fbo.tex.h != h) {
+      if (layer_fbo.tex.id != 0) {
+        glDeleteTextures(1, &layer_fbo.tex.id);
+        glDeleteFramebuffers(1, &layer_fbo.fbo_id);
+      }
+      layer_fbo.tex.createRGBA8(w, h);
+      layer_fbo.create(w, h);
+    }
+  }
+
+  // call this after applying the op if you want to composite the result
+  // make sure that the shader renders to layer_fbo
+  void composite(GLuint base_tex_id, int out_w, int out_h, GLuint dest_fbo_id) {
+    // composite
+    glBindFramebuffer(GL_FRAMEBUFFER, dest_fbo_id);
+    glUseProgram(prog_composite_id);
+    // texture 0: base
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, base_tex_id);
+    glUniform1i(glGetUniformLocation(prog_composite_id, "uBase"), 0);
+    // texture 1: layer
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, layer_fbo.tex.id);
+    glUniform1i(glGetUniformLocation(prog_composite_id, "uLayer"), 1);
+    glUniform1i(glGetUniformLocation(prog_composite_id, "uMode"), static_cast<int>(mix_type));
+    glUniform1f(glGetUniformLocation(prog_composite_id, "uOpacity"), opacity);
+
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+  }
+
+  virtual ~Op() = default;
+  virtual char const* get_type_name() const = 0;
+  virtual void apply(GLuint base_tex_id, int out_w, int out_h, GLuint dest_fbo_id) {}
+};
+
 struct OpConstColor : public Op {
   float color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
   char const* get_type_name() const override { return "const/color"; }
 
   OpConstColor() {
-    prog_id = make_fullscreen_program("shaders/const_color.frag");
+    prog_id = make_fullscreen_program("shaders/const/color.frag");
+    init();
   }
 
-  void apply(GLuint tex_id, int out_w, int out_h) override {
+  void apply(GLuint base_tex_id, int out_w, int out_h, GLuint dest_fbo_id) override {
+    ensure_layer_fbo(out_w, out_h);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, layer_fbo.fbo_id);
     glUseProgram(prog_id);
     glUniform4fv(glGetUniformLocation(prog_id, "uColor"), 1, color);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-  }
-};
 
-struct OpConstGradient : public Op {
-  float color_a[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-  float color_b[4] = {0.0f, 0.0f, 0.0f, 1.0f};
-  float angle = 0.0f;
-  char const* get_type_name() const override { return "const/gradient"; }
-
-  void apply(GLuint tex_id, int out_w, int out_h) override {
-    // TODO
+    composite(base_tex_id, out_w, out_h, dest_fbo_id);
   }
 };
 
@@ -180,13 +227,17 @@ struct OpGenTransform : public Op {
   char const* get_type_name() const override { return "gen/transform"; }
 
   OpGenTransform() {
-    prog_id = make_fullscreen_program("shaders/gen_transform.frag");
+    prog_id = make_fullscreen_program("shaders/gen/transform.frag");
+    init();
   }
 
-  void apply(GLuint tex_id, int out_w, int out_h) override {
+  void apply(GLuint base_tex_id, int out_w, int out_h, GLuint dest_fbo_id) override {
+    ensure_layer_fbo(out_w, out_h);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, layer_fbo.fbo_id);
     glUseProgram(prog_id);
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, tex_id);
+    glBindTexture(GL_TEXTURE_2D, base_tex_id);
     glUniform1i(glGetUniformLocation(prog_id, "uTex"), 0);
 
     AffineMat3 M = amat3_identity();
@@ -212,15 +263,8 @@ struct OpGenTransform : public Op {
     glUniformMatrix3fv(glGetUniformLocation(prog_id, "uXform"), 1, GL_TRUE, M.m);
 
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-  }
-};
 
-struct OpEffBlur : public Op {
-  float radius = 5.0f;
-  char const* get_type_name() const override { return "eff/blur"; }
-
-  void apply(GLuint tex_id, int out_w, int out_h) override {
-    // TODO
+    composite(base_tex_id, out_w, out_h, dest_fbo_id);
   }
 };
 
@@ -255,7 +299,7 @@ struct state_t {
       FBO &dst = usePing ? ping : pong;
       glBindFramebuffer(GL_FRAMEBUFFER, dst.fbo_id);
       glViewport(0, 0, canvas_w, canvas_h);
-      ops[i]->apply(current, canvas_w, canvas_h);
+      ops[i]->apply(current, canvas_w, canvas_h, dst.fbo_id);
       current = dst.tex.id;
       usePing = !usePing;
     }
@@ -510,13 +554,6 @@ int main() {
           INIT_FLOAT4(o.color, 1.0f, 1.0f, 1.0f, 1.0f);
           CHECK_PROG_ID_AND_PUSH(o);
         }
-        if (ImGui::Selectable("const/gradient")) {
-          OpConstGradient o;
-          INIT_FLOAT4(o.color_a, 1.0f, 1.0f, 1.0f, 1.0f);
-          INIT_FLOAT4(o.color_b, 0.0f, 0.0f, 0.0f, 1.0f);
-          o.angle = 0.0f;
-          CHECK_PROG_ID_AND_PUSH(o);
-        }
         if (ImGui::Selectable("gen/transform")) {
           OpGenTransform o;
           o.offset_x        = 0.0f;
@@ -527,11 +564,6 @@ int main() {
           o.angle           = 0.0f;
           o.flip_horizontal = false;
           o.flip_vertical   = false;
-          CHECK_PROG_ID_AND_PUSH(o);
-        }
-        if (ImGui::Selectable("eff/blur")) {
-          OpEffBlur o;
-          o.radius = 5.0f;
           CHECK_PROG_ID_AND_PUSH(o);
         }
         ImGui::EndCombo();
@@ -545,7 +577,9 @@ int main() {
         Op &operation = *(g_state.ops[i]);
         const char *type_name = operation.get_type_name();
 
-        const char *header = std::format("{} - {}", i, type_name).c_str();
+        const char *header = std::format(
+          "{} - {}{}", i, type_name, operation.bypass ? " (bypassed)" : ""
+        ).c_str();
 
         ImGui::SetNextItemOpen(true, ImGuiCond_Once);
 
@@ -579,22 +613,6 @@ int main() {
               ImGui::ColorEdit4(
                 format_id("color", i),
                 (float *)&static_cast<OpConstColor &>(operation).color
-              );
-            } else if (strcmp(type_name, "const/gradient") == 0) {
-              OpConstGradient &opg = static_cast<OpConstGradient &>(operation);
-              ImGui::ColorEdit4(
-                format_id("color A", i),
-                (float *)&opg.color_a
-              );
-              ImGui::ColorEdit4(
-                format_id("color B", i),
-                (float *)&opg.color_b
-              );
-              ImGui::SliderFloat(
-                format_id("angle", i),
-                &opg.angle,
-                0.0f,
-                360.0f
               );
             } else if (strcmp(type_name, "gen/transform") == 0) {
               OpGenTransform &opt = static_cast<OpGenTransform &>(operation);
@@ -640,14 +658,6 @@ int main() {
                 format_id("flip vertical", i),
                 &opt.flip_vertical
               );
-            } else if (strcmp(type_name, "eff/blur") == 0) {
-              OpEffBlur &ope = static_cast<OpEffBlur &>(operation);
-              ImGui::SliderFloat(
-                format_id("radius", i),
-                &ope.radius,
-                0.0f,
-                25.0f
-              );
             }
           }
 
@@ -656,31 +666,29 @@ int main() {
           if (ImGui::CollapsingHeader(format_id("blending mode", i))) {
             const char *items[] = {
               "normal",
-              "add",
               "multiply",
-              "overlay"
+              "screen",
+              "overlay",
+              "soft light",
+              "hard light",
+              "color dodge",
+              "color burn",
+              "linear dodge",
+              "linear burn",
+              "lighten",
+              "darken",
+              "difference",
+              "exclusion"
             };
 
-            int current_item = 0;
-
-            switch (operation.mix_type) {
-            case MixType::MixNormal:   current_item = 0; break;
-            case MixType::MixAdd:      current_item = 1; break;
-            case MixType::MixMultiply: current_item = 2; break;
-            case MixType::MixOverlay:  current_item = 3; break;
-            }
+            int current_item = static_cast<int>(operation.mix_type);
 
             if (ImGui::Combo(
                   format_id("type", i),
                   &current_item,
                   items,
                   IM_ARRAYSIZE(items))) {
-              switch (current_item) {
-              case 0: operation.mix_type = MixType::MixNormal;   break;
-              case 1: operation.mix_type = MixType::MixAdd;      break;
-              case 2: operation.mix_type = MixType::MixMultiply; break;
-              case 3: operation.mix_type = MixType::MixOverlay;  break;
-              }
+              operation.mix_type = static_cast<MixType>(current_item);
             }
 
             ImGui::SliderFloat(
