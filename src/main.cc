@@ -31,7 +31,7 @@ extern "C" {
 #include "style.h"
 #include "utils.h"
 
-static void gl_check(bool cond, const char* msg) {
+static void glCheck(bool cond, const char* msg) {
   if (!cond) { throw std::runtime_error(msg); }
 }
 
@@ -70,7 +70,7 @@ static GLuint link_program(GLuint vertex_shader, GLuint fragment_shader) {
 
 static std::string load_source(const char* filepath) {
   FILE* file = fopen(filepath, "rb");
-  gl_check(file != nullptr, "Failed to open shader file");
+  glCheck(file != nullptr, "Failed to open shader file");
   fseek(file, 0, SEEK_END);
   size_t size = ftell(file);
   fseek(file, 0, SEEK_SET);
@@ -98,11 +98,24 @@ struct Texture {
 struct FBO {
   GLuint fbo_id = 0;
   Texture tex;
+  // TODO handle texture creation inside create() so we dont have to do fbo.tex.*
   void create(int width, int height) {
     glGenFramebuffers(1, &fbo_id);
     glBindFramebuffer(GL_FRAMEBUFFER, fbo_id);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex.id, 0);
-    gl_check(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE, "FBO incomplete");
+    glCheck(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE, "FBO incomplete");
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  }
+
+  void resize(int width, int height) {
+    if (tex.id != 0) glDeleteTextures(1, &tex.id);
+    tex.createRGBA8(width, height);
+    if (fbo_id != 0) glDeleteFramebuffers(1, &fbo_id);
+    glGenFramebuffers(1, &fbo_id);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo_id);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex.id, 0);
+    glCheck(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE, "FBO incomplete after resize");
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
   }
 };
@@ -171,7 +184,7 @@ struct Op {
 
   // call this after applying the op if you want to composite the result
   // make sure that the shader renders to layer_fbo
-  void composite(GLuint base_tex_id, int out_w, int out_h, GLuint dest_fbo_id) {
+  void composite(GLuint base_tex_id, GLuint dest_fbo_id) {
     // composite
     glBindFramebuffer(GL_FRAMEBUFFER, dest_fbo_id);
     glUseProgram(prog_composite_id);
@@ -191,7 +204,12 @@ struct Op {
 
   virtual ~Op() = default;
   virtual char const* get_type_name() const = 0;
-  virtual void apply(GLuint base_tex_id, int out_w, int out_h, GLuint dest_fbo_id) {}
+  virtual void apply(
+    GLuint /* base_tex_id */,
+    int    /* out_w */,
+    int    /* out_h */,
+    GLuint /* dest_fbo_id */
+  ) {}
 };
 
 struct OpConstColor : public Op {
@@ -211,7 +229,70 @@ struct OpConstColor : public Op {
     glUniform4fv(glGetUniformLocation(prog_id, "uColor"), 1, color);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 
-    composite(base_tex_id, out_w, out_h, dest_fbo_id);
+    composite(base_tex_id, dest_fbo_id);
+  }
+};
+
+// TODO cache by path at state to avoid loading the same image multiple times
+struct OpConstImage : public Op {
+  std::string image_path;
+  GLuint tex_id = 0;
+  int tex_w = 0, tex_h = 0;
+  bool want_reload = false;
+  char const* get_type_name() const override { return "const/image"; }
+
+  OpConstImage(std::string path) : image_path(std::move(path)) {
+    prog_id = make_fullscreen_program("shaders/const/image.frag");
+    if (!path.empty()) load_image();
+    init();
+  }
+
+  ~OpConstImage() override {
+    if (tex_id) { glDeleteTextures(1, &tex_id); }
+  }
+
+  void load_image() {
+    int w, h, n;
+    stbi_set_flip_vertically_on_load(1);
+    stbi_uc* pixels = stbi_load(image_path.c_str(), &w, &h, &n, 4);
+    if (!pixels) { 
+      LOG_ERROR("Failed to load image: %s", image_path.c_str());
+      return; 
+    }
+
+    if (!tex_id) glGenTextures(1, &tex_id);
+    glBindTexture(GL_TEXTURE_2D, tex_id);
+
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    stbi_image_free(pixels);
+    tex_w = w; tex_h = h;
+    LOG_INFO("Loaded image: %s (%dx%d)", image_path.c_str(), w, h);
+    want_reload = false;
+  }
+
+  void apply(GLuint base_tex_id, int out_w, int out_h, GLuint dest_fbo_id) override {
+    if (want_reload) {
+      load_image();
+      want_reload = false;
+    }
+    if (tex_id == 0) { return; }
+
+    ensure_layer_fbo(out_w, out_h);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, layer_fbo.fbo_id);
+    glUseProgram(prog_id);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex_id);
+    glUniform1i(glGetUniformLocation(prog_id, "uTex"), 0);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+    composite(base_tex_id, dest_fbo_id);
   }
 };
 
@@ -264,7 +345,7 @@ struct OpGenTransform : public Op {
 
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 
-    composite(base_tex_id, out_w, out_h, dest_fbo_id);
+    composite(base_tex_id, dest_fbo_id);
   }
 };
 
@@ -274,20 +355,38 @@ struct OpGenTransform : public Op {
   v[2] = c; \
   v[3] = d;
 
-struct state_t {
+struct State {
   int canvas_w = 0; // init later
   int canvas_h = 0;
   FBO ping, pong;
   std::vector<std::unique_ptr<Op>> ops;
 
-  float zoom_factor  = 1.0f;
-  float last_mouse_x = 0.0f;
-  float last_mouse_y = 0.0f;
-  float pan_x        = 0.0f;
-  float pan_y        = 0.0f;
+  float zoom_factor   = 1.0f;
+  float last_mouse_x  = 0.0f;
+  float last_mouse_y  = 0.0f;
+  float pan_x         = 0.0f;
+  float pan_y         = 0.0f;
   bool isfullscreen   = false;
   bool isopen_editor  = true;
   bool isconfirm_exit = false;
+
+  void init() {
+    ops.reserve(16);
+    ops.push_back(std::make_unique<OpConstImage>(""));
+
+    int init_w = 512, init_h = 512;
+    set_canvas_size(init_w, init_h);
+
+    // init vao & fbos
+    GLuint vao = 0;
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+
+    ping.tex.createRGBA8(canvas_w, canvas_h);
+    ping.create(canvas_w, canvas_h);
+    pong.tex.createRGBA8(canvas_w, canvas_h);
+    pong.create(canvas_w, canvas_h);
+  }
 
   GLuint run(GLuint input_tex_id) {
     bool usePing = true;
@@ -305,8 +404,15 @@ struct state_t {
     }
     return current;
   }
+
+  void set_canvas_size(int w, int h) {
+    canvas_w = w;
+    canvas_h = h;
+    ping.resize(canvas_w, canvas_h);
+    pong.resize(canvas_w, canvas_h);
+  }
 };
-static state_t g_state;
+static State g_state;
 
 void window_close_callback(GLFWwindow *window) {
   if (!g_state.isconfirm_exit) {
@@ -368,27 +474,10 @@ int main() {
   ImGui_ImplGlfw_InitForOpenGL(window, true);
   ImGui_ImplOpenGL3_Init("#version 330");
 
-  // load image
-  int iw, ih, nc;
-  stbi_set_flip_vertically_on_load(1);
-  stbi_uc *image_data = stbi_load("./test.jpg", &iw, &ih, &nc, 4);
-  gl_check(image_data != nullptr, "Failed to load image");
-  g_state.canvas_w = iw;
-  g_state.canvas_h = ih;
+  g_state.init();
 
   Texture input_texture;
-  input_texture.createRGBA8(iw, ih, image_data);
-  stbi_image_free(image_data);
-
-  // init vao & fbos
-  GLuint vao = 0;
-  glGenVertexArrays(1, &vao);
-  glBindVertexArray(vao);
-
-  g_state.ping.tex.createRGBA8(g_state.canvas_w, g_state.canvas_h);
-  g_state.ping.create(g_state.canvas_w, g_state.canvas_h);
-  g_state.pong.tex.createRGBA8(g_state.canvas_w, g_state.canvas_h);
-  g_state.pong.create(g_state.canvas_w, g_state.canvas_h);
+  input_texture.createRGBA8(g_state.canvas_w, g_state.canvas_h);
 
   GLuint display_prog = make_fullscreen_program("shaders/present.frag");
 
@@ -429,7 +518,7 @@ int main() {
       g_state.isconfirm_exit = true;
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_E)) {
+    if (ImGui::IsKeyPressed(ImGuiKey_E) && !io.WantCaptureKeyboard) {
       g_state.isopen_editor = !g_state.isopen_editor;
     }
 
@@ -541,6 +630,21 @@ int main() {
 
       ImGui::Begin("editor", &g_state.isopen_editor);
 
+      // TODO do "first source wins" instead of explicit width and height so we
+      //      don't have to create an input texture and just use the texture
+      //      from the op output
+      //      if first op is not generator, do a width/height input in
+      //      the settings ui of that op (like TouchDesigner)
+      if (ImGui::InputInt("canvas width", &g_state.canvas_w)
+        || ImGui::InputInt("canvas height", &g_state.canvas_h)) {
+        g_state.set_canvas_size(g_state.canvas_w, g_state.canvas_h);
+        if (input_texture.id != 0) glDeleteTextures(1, &input_texture.id);
+        input_texture.createRGBA8(g_state.canvas_w, g_state.canvas_h);
+      }
+      g_state.canvas_w = std::max(1, g_state.canvas_w);
+      g_state.canvas_h = std::max(1, g_state.canvas_h);
+      ImGui::Separator();
+
       if (ImGui::BeginCombo("add operation", "...")) {
         #define CHECK_PROG_ID_AND_PUSH(op) \
           if (!op.prog_id) { \
@@ -552,6 +656,10 @@ int main() {
         if (ImGui::Selectable("const/color")) {
           OpConstColor o;
           INIT_FLOAT4(o.color, 1.0f, 1.0f, 1.0f, 1.0f);
+          CHECK_PROG_ID_AND_PUSH(o);
+        }
+        if (ImGui::Selectable("const/image")) {
+          OpConstImage o("");
           CHECK_PROG_ID_AND_PUSH(o);
         }
         if (ImGui::Selectable("gen/transform")) {
@@ -614,6 +722,19 @@ int main() {
                 format_id("color", i),
                 (float *)&static_cast<OpConstColor &>(operation).color
               );
+            } else if (strcmp(type_name, "const/image") == 0) {
+              OpConstImage &opt = static_cast<OpConstImage &>(operation);
+              char buffer[256];
+              strncpy(buffer, opt.image_path.c_str(), sizeof(buffer));
+              if (ImGui::InputText(
+                    format_id("image path", i),
+                    buffer,
+                    sizeof(buffer))) {
+                opt.image_path = std::string(buffer);
+              }
+              if (ImGui::Button(format_id("reload image", i))) {
+                opt.want_reload = true;
+              }
             } else if (strcmp(type_name, "gen/transform") == 0) {
               OpGenTransform &opt = static_cast<OpGenTransform &>(operation);
               ImGui::SliderFloat(

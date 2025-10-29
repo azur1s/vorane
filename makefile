@@ -28,7 +28,7 @@ CFLAGS := -Wall -Wextra -Wpedantic \
 # -DASK_FOR_HIGH_PERFORMANCE_GPU
 #   request high performance GPU on laptops with dual GPU
 CFLAGS += \
-# 	-DASK_FOR_HIGH_PERFORMANCE_GPU
+	-DASK_FOR_HIGH_PERFORMANCE_GPU
 LDFLAGS := -lglfw3 -lopengl32
 
 .PHONY: all run clean
