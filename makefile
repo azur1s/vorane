@@ -3,7 +3,7 @@ CC := g++
 BUILD_DIR := build
 TARGET:= $(BUILD_DIR)/vorane
 
-SRCS := $(wildcard src/*.cc)
+SRCS := $(wildcard src/*.cpp)
 EXTERNAL_CPP_SRCS := \
 	external/imgui/imgui.cpp \
 	external/imgui/imgui_draw.cpp \
@@ -15,7 +15,7 @@ EXTERNAL_C_SRCS := \
 	external/glad/src/glad.c
 ALL_SRCS := $(SRCS) $(EXTERNAL_CPP_SRCS) $(EXTERNAL_C_SRCS)
 
-OBJ_SRCS := $(SRCS:.cc=.o) \
+OBJ_SRCS := $(SRCS:.cpp=.o) \
 	$(EXTERNAL_CPP_SRCS:.cpp=.o) \
 	$(EXTERNAL_C_SRCS:.c=.o)
 OBJS := $(patsubst %,$(BUILD_DIR)/%,$(OBJ_SRCS))
@@ -41,7 +41,7 @@ $(TARGET): $(OBJS)
 run: $(TARGET)
 	./$(TARGET)
 
-$(BUILD_DIR)/%.o: %.cc
+$(BUILD_DIR)/%.o: %.cpp
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
