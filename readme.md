@@ -1,7 +1,7 @@
 <samp>
 
 # vorane
-Declarative image editor.
+Declarative compositor for image editing.
 
 ## Build instructions
 Prerequisites:
