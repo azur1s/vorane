@@ -1,6 +1,7 @@
 #pragma once
 
 #include <glad/glad.h>
+#include <vector>
 #include "shader.hpp"
 #include "utils.hpp"
 
@@ -24,19 +25,14 @@ enum class MixType {
 };
 
 struct Op {
+  // graph-related fields
+  int id = -1; // assigned by state
+  std::vector<int> input_ids; // ids of input ops
+  bool dirty = true; // whether the op needs to be re-evaluated
+  FBO layer_fbo; // op result stored here
+
   GLuint prog_id = 0;
   bool bypass = false;
-
-  // composition-related fields
-  GLuint prog_composite_id = 0; // program used for compositing
-  FBO layer_fbo; // op result stored here
-  MixType mix_type = MixType::MixNormal;
-  float opacity = 1.0f;
-
-  // call this after Op*()
-  void init() {
-    prog_composite_id = make_fullscreen_program("shaders/composite.frag");
-  }
 
   // call this before applying the op
   void ensure_layer_fbo(int w, int h) {
@@ -50,56 +46,32 @@ struct Op {
     }
   }
 
-  // call this after applying the op if you want to composite the result
-  // make sure that the shader renders to layer_fbo
-  void composite(GLuint base_tex_id, GLuint dest_fbo_id) {
-    // composite
-    glBindFramebuffer(GL_FRAMEBUFFER, dest_fbo_id);
-    glUseProgram(prog_composite_id);
-    // texture 0: base
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, base_tex_id);
-    glUniform1i(glGetUniformLocation(prog_composite_id, "uBase"), 0);
-    // texture 1: layer
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, layer_fbo.tex.id);
-    glUniform1i(glGetUniformLocation(prog_composite_id, "uLayer"), 1);
-    glUniform1i(glGetUniformLocation(prog_composite_id, "uMode"), static_cast<int>(mix_type));
-    glUniform1f(glGetUniformLocation(prog_composite_id, "uOpacity"), opacity);
-
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-  }
-
   virtual ~Op() = default;
   virtual char const* get_type_name() const = 0;
   virtual void apply(
-    GLuint /* base_tex_id */,
-    int    /* out_w */,
-    int    /* out_h */,
-    GLuint /* dest_fbo_id */
+    const std::vector<GLuint>& /* input_textures */,
+    int /* out_w */,
+    int /* out_h */
   ) {}
   // passes index or any unique id for ImGui element ids
   virtual void ui(int) {}
 };
 
 struct OpConstColor : public Op {
-  float color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
   char const* get_type_name() const override { return "const/color"; }
 
   OpConstColor() {
     prog_id = make_fullscreen_program("shaders/const/color.frag");
-    init();
   }
 
-  void apply(GLuint base_tex_id, int out_w, int out_h, GLuint dest_fbo_id) override {
+  void apply(const std::vector<GLuint>&, int out_w, int out_h) override {
     ensure_layer_fbo(out_w, out_h);
 
     glBindFramebuffer(GL_FRAMEBUFFER, layer_fbo.fbo_id);
     glUseProgram(prog_id);
     glUniform4fv(glGetUniformLocation(prog_id, "uColor"), 1, color);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-
-    composite(base_tex_id, dest_fbo_id);
   }
 
   void ui(int i) override {
@@ -121,7 +93,6 @@ struct OpConstImage : public Op {
   OpConstImage(std::string path) : image_path(std::move(path)) {
     prog_id = make_fullscreen_program("shaders/const/image.frag");
     if (!path.empty()) load_image();
-    init();
   }
 
   ~OpConstImage() override {
@@ -153,7 +124,7 @@ struct OpConstImage : public Op {
     want_reload = false;
   }
 
-  void apply(GLuint base_tex_id, int out_w, int out_h, GLuint dest_fbo_id) override {
+  void apply(const std::vector<GLuint>&, int out_w, int out_h) override {
     if (want_reload) {
       load_image();
       want_reload = false;
@@ -168,8 +139,6 @@ struct OpConstImage : public Op {
     glBindTexture(GL_TEXTURE_2D, tex_id);
     glUniform1i(glGetUniformLocation(prog_id, "uTex"), 0);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-
-    composite(base_tex_id, dest_fbo_id);
   }
 
   void ui(int i) override {
@@ -187,6 +156,76 @@ struct OpConstImage : public Op {
   }
 };
 
+struct OpGenComposite : public Op {
+  MixType mix_type = MixType::MixNormal;
+  float opacity = 1.0f;
+  char const* get_type_name() const override { return "gen/composite"; }
+
+  OpGenComposite() {
+    prog_id = make_fullscreen_program("shaders/gen/composite.frag");
+  }
+
+  void apply(const std::vector<GLuint>& input_textures, int out_w, int out_h) override {
+    if (input_textures.size() < 2) { return; }
+    GLuint base_tex_id  = input_textures[0];
+    GLuint layer_tex_id = input_textures[1];
+
+    ensure_layer_fbo(out_w, out_h);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, layer_fbo.fbo_id);
+    glViewport(0, 0, out_w, out_h);
+    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glUseProgram(prog_id);
+    // texture 0: base
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, base_tex_id);
+    glUniform1i(glGetUniformLocation(prog_id, "uBase"), 0);
+    // texture 1: layer
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, layer_tex_id);
+    glUniform1i(glGetUniformLocation(prog_id, "uLayer"), 1);
+    glUniform1i(glGetUniformLocation(prog_id, "uMode"), static_cast<int>(mix_type));
+    glUniform1f(glGetUniformLocation(prog_id, "uOpacity"), opacity);
+
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+  }
+
+  void ui(int i) override {
+    const char *items[] = {
+      "normal",
+      "multiply",
+      "screen",
+      "overlay",
+      "soft light",
+      "hard light",
+      "color dodge",
+      "color burn",
+      "linear dodge",
+      "linear burn",
+      "lighten",
+      "darken",
+      "difference",
+      "exclusion"
+    };
+    int current_mix_type = static_cast<int>(mix_type);
+    if (ImGui::Combo(
+          format_id("mix type", i),
+          &current_mix_type,
+          items,
+          IM_ARRAYSIZE(items))) {
+      mix_type = static_cast<MixType>(current_mix_type);
+    }
+    ImGui::SliderFloat(
+      format_id("opacity", i),
+      &opacity,
+      0.0f,
+      1.0f
+    );
+  }
+};
+
 struct OpGenTransform : public Op {
   float offset_x        = 0.0f;
   float offset_y        = 0.0f;
@@ -200,13 +239,20 @@ struct OpGenTransform : public Op {
 
   OpGenTransform() {
     prog_id = make_fullscreen_program("shaders/gen/transform.frag");
-    init();
   }
 
-  void apply(GLuint base_tex_id, int out_w, int out_h, GLuint dest_fbo_id) override {
+  void apply(const std::vector<GLuint>& input_textures, int out_w, int out_h) override {
+    GLuint base_tex_id = 0;
+    if (input_textures.empty()) { return; }
+    base_tex_id = input_textures[0];
+
     ensure_layer_fbo(out_w, out_h);
 
     glBindFramebuffer(GL_FRAMEBUFFER, layer_fbo.fbo_id);
+    glViewport(0, 0, out_w, out_h);
+    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
     glUseProgram(prog_id);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, base_tex_id);
@@ -235,8 +281,6 @@ struct OpGenTransform : public Op {
     glUniformMatrix3fv(glGetUniformLocation(prog_id, "uXform"), 1, GL_TRUE, M.m);
 
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-
-    composite(base_tex_id, dest_fbo_id);
   }
 
   void ui(int i) override {
@@ -260,7 +304,7 @@ struct OpGenTransform : public Op {
     );
     ImGui::SliderFloat(
       format_id("size y", i),
-      &size_uniform ? &size_x : &size_y,
+      size_uniform ? &size_x : &size_y,
       0.01f,
       10.0f
     );

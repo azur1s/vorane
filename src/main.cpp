@@ -1,7 +1,3 @@
-#include "imgui.h"
-#include "imgui_impl_glfw.h"
-#include "imgui_impl_opengl3.h"
-
 #if defined(_WIN32)
 #include <windows.h>
 extern "C" {
@@ -19,6 +15,10 @@ extern "C" {
 
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
+#include "imgui.h"
+#include "imgui_impl_glfw.h"
+#include "imgui_impl_opengl3.h"
+#include "imnodes.h"
 
 #include <stdio.h>
 #include <format>
@@ -43,7 +43,9 @@ struct State {
   int canvas_w = 0; // init later
   int canvas_h = 0;
   FBO ping, pong;
+  int next_op_id = 0;
   std::vector<std::unique_ptr<Op>> ops;
+  int output_node_id = -1;
 
   float zoom_factor   = 1.0f;
   float last_mouse_x  = 0.0f;
@@ -56,7 +58,6 @@ struct State {
 
   void init() {
     ops.reserve(16);
-    ops.push_back(std::make_unique<OpConstImage>(""));
 
     int init_w = 512, init_h = 512;
     set_canvas_size(init_w, init_h);
@@ -72,21 +73,62 @@ struct State {
     pong.create(canvas_w, canvas_h);
   }
 
-  GLuint run(GLuint input_tex_id) {
-    bool usePing = true;
-    GLuint current = input_tex_id;
-    for(size_t i = 0; i < ops.size(); ++i) {
-      if (ops[i]->bypass) continue;
-      // dont run if op is invalid
-      if (ops[i]->prog_id == 0) continue;
-      FBO &dst = usePing ? ping : pong;
-      glBindFramebuffer(GL_FRAMEBUFFER, dst.fbo_id);
-      glViewport(0, 0, canvas_w, canvas_h);
-      ops[i]->apply(current, canvas_w, canvas_h, dst.fbo_id);
-      current = dst.tex.id;
-      usePing = !usePing;
+  void register_op(std::unique_ptr<Op> op) {
+    op->id = next_op_id++;
+    if (op->get_type_name() == std::string("const/output")) {
+      output_node_id = op->id;
     }
-    return current;
+    ops.push_back(std::move(op));
+  }
+
+  std::unique_ptr<Op>& get_op_by_id(int id) {
+    for (auto& op : ops) {
+      if (op->id == id) {
+        return op;
+      }
+    }
+    static std::unique_ptr<Op> null_op = nullptr;
+    return null_op;
+  }
+
+  void unregister_op(int id) {
+    ops.erase(
+      std::remove_if(
+        ops.begin(),
+        ops.end(),
+        [id](const std::unique_ptr<Op>& op) { return op->id == id; }
+      ),
+      ops.end()
+    );
+  }
+
+  void render(Op* op, const std::vector<GLuint>& input_textures) {
+    op->apply(
+      input_textures,
+      canvas_w,
+      canvas_h
+    );
+  }
+
+  GLuint eval(int root_id) {
+    std::unique_ptr<Op>& root_op = get_op_by_id(root_id);
+    if (!root_op) {
+      return 0;
+    } else {
+      std::vector<GLuint> input_textures;
+      input_textures.reserve(root_op->input_ids.size());
+
+      for (int input_id : root_op->input_ids) {
+        if (input_id == root_op->id) {
+          LOG_WARN("Detected self-referencing input for op id=%d, skipping", root_op->id);
+          continue;
+        }
+        input_textures.push_back(eval(input_id));
+      }
+
+      render(root_op.get(), input_textures);
+      return root_op->layer_fbo.tex.id;
+    }
   }
 
   void set_canvas_size(int w, int h) {
@@ -218,7 +260,10 @@ int main() {
 
     // --- render
 
-    GLuint final_tex = g_state.run(input_texture.id);
+    GLuint final_tex = input_texture.id;
+    if (g_state.output_node_id >= 0) {
+      final_tex = g_state.eval(g_state.output_node_id);
+    }
 
     // scale to fit window instead of stretch
     float aspect_canvas = (float)g_state.canvas_w / (float)g_state.canvas_h;
@@ -312,49 +357,25 @@ int main() {
 
       ImGui::Begin("editor", &g_state.isopen_editor);
 
-      // TODO do "first source wins" instead of explicit width and height so we
-      //      don't have to create an input texture and just use the texture
-      //      from the op output
-      //      if first op is not generator, do a width/height input in
-      //      the settings ui of that op (like TouchDesigner)
-      if (ImGui::InputInt("canvas width", &g_state.canvas_w)
-        || ImGui::InputInt("canvas height", &g_state.canvas_h)) {
-        g_state.set_canvas_size(g_state.canvas_w, g_state.canvas_h);
-        if (input_texture.id != 0) glDeleteTextures(1, &input_texture.id);
-        input_texture.createRGBA8(g_state.canvas_w, g_state.canvas_h);
-      }
-      g_state.canvas_w = std::max(1, g_state.canvas_w);
-      g_state.canvas_h = std::max(1, g_state.canvas_h);
-      ImGui::Separator();
-
       if (ImGui::BeginCombo("add operation", "...")) {
         #define CHECK_PROG_ID_AND_PUSH(op) \
           if (!op.prog_id) { \
             LOG_ERROR("Failed to create shader for %s", op.get_type_name()); \
           } else { \
-            g_state.ops.push_back(std::make_unique<decltype(op)>(op)); \
+            g_state.register_op(std::make_unique<decltype(op)>(op)); \
           }
 
         if (ImGui::Selectable("const/color")) {
-          OpConstColor o;
-          INIT_FLOAT4(o.color, 1.0f, 1.0f, 1.0f, 1.0f);
-          CHECK_PROG_ID_AND_PUSH(o);
+          OpConstColor op; CHECK_PROG_ID_AND_PUSH(op);
         }
         if (ImGui::Selectable("const/image")) {
-          OpConstImage o("");
-          CHECK_PROG_ID_AND_PUSH(o);
+          OpConstImage op(""); CHECK_PROG_ID_AND_PUSH(op);
+        }
+        if (ImGui::Selectable("gen/composite")) {
+          OpGenComposite op; CHECK_PROG_ID_AND_PUSH(op);
         }
         if (ImGui::Selectable("gen/transform")) {
-          OpGenTransform o;
-          o.offset_x        = 0.0f;
-          o.offset_y        = 0.0f;
-          o.size_x          = 1.0f;
-          o.size_y          = 1.0f;
-          o.size_uniform    = true;
-          o.angle           = 0.0f;
-          o.flip_horizontal = false;
-          o.flip_vertical   = false;
-          CHECK_PROG_ID_AND_PUSH(o);
+          OpGenTransform op; CHECK_PROG_ID_AND_PUSH(op);
         }
         ImGui::EndCombo();
       }
@@ -368,19 +389,27 @@ int main() {
         const char *type_name = operation.get_type_name();
 
         const char *header = std::format(
-          "{} - {}{}", i, type_name, operation.bypass ? " (bypassed)" : ""
+          "{} - {}{}", operation.id, type_name, operation.bypass ? " (bypassed)" : ""
         ).c_str();
 
         ImGui::SetNextItemOpen(true, ImGuiCond_Once);
 
         if (ImGui::CollapsingHeader(header)) {
           ImGui::Indent();
+          if (ImGui::Button(format_id("set as output", i))) {
+            g_state.output_node_id = g_state.ops[i]->id;
+            LOG_INFO("Set operation %d as output node", g_state.ops[i]->id);
+          }
           if (ImGui::Button(format_id("bypass", i))) {
             g_state.ops[i]->bypass = !g_state.ops[i]->bypass;
           }
           ImGui::SameLine();
           if (ImGui::Button(format_id("remove", i))) {
-            g_state.ops.erase(g_state.ops.begin() + i);
+            if (g_state.output_node_id == g_state.ops[i]->id) {
+              g_state.output_node_id = -1;
+            }
+
+            g_state.unregister_op(g_state.ops[i]->id);
             i--;
             continue;
           }
@@ -397,48 +426,32 @@ int main() {
 
           ImGui::Spacing();
 
-          ImGui::SetNextItemOpen(true, ImGuiCond_Once);
-          if (ImGui::CollapsingHeader(format_id("settings", i))) {
-            operation.ui(i);
+          // inputs
+          if (ImGui::Button(format_id("add input", i))) {
+            g_state.ops[i]->input_ids.push_back(-1);
           }
 
-          ImGui::Spacing();
-
-          if (ImGui::CollapsingHeader(format_id("blending mode", i))) {
-            const char *items[] = {
-              "normal",
-              "multiply",
-              "screen",
-              "overlay",
-              "soft light",
-              "hard light",
-              "color dodge",
-              "color burn",
-              "linear dodge",
-              "linear burn",
-              "lighten",
-              "darken",
-              "difference",
-              "exclusion"
-            };
-
-            int current_item = static_cast<int>(operation.mix_type);
-
-            if (ImGui::Combo(
-                  format_id("type", i),
-                  &current_item,
-                  items,
-                  IM_ARRAYSIZE(items))) {
-              operation.mix_type = static_cast<MixType>(current_item);
-            }
-
-            ImGui::SliderFloat(
-              format_id("opacity", i),
-              &operation.opacity,
-              0.0f,
-              1.0f
+          for (size_t j = 0; j < operation.input_ids.size(); j++) {
+            ImGui::PushID(j);
+            ImGui::Text("input %d:", (int)j);
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(60.0f);
+            ImGui::InputInt(
+              format_id("##input_id", i),
+              &operation.input_ids[j]
             );
+            ImGui::SameLine();
+            if (ImGui::Button(format_id("remove input", i))) {
+              operation.input_ids.erase(operation.input_ids.begin() + j);
+              ImGui::PopID();
+              j--;
+              continue;
+            }
+            ImGui::PopID();
           }
+
+          operation.ui(i);
+
           ImGui::Unindent();
         }
       }

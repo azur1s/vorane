@@ -4,13 +4,15 @@ BUILD_DIR := build
 TARGET:= $(BUILD_DIR)/vorane
 
 SRCS := $(wildcard src/*.cpp)
+HEADERS := $(wildcard src/*.h) $(wildcard src/*.hpp)
 EXTERNAL_CPP_SRCS := \
 	external/imgui/imgui.cpp \
 	external/imgui/imgui_draw.cpp \
 	external/imgui/imgui_tables.cpp \
 	external/imgui/imgui_widgets.cpp \
 	external/imgui/backends/imgui_impl_glfw.cpp \
-	external/imgui/backends/imgui_impl_opengl3.cpp
+	external/imgui/backends/imgui_impl_opengl3.cpp \
+	external/imnodes/imnodes.cpp
 EXTERNAL_C_SRCS := \
 	external/glad/src/glad.c
 ALL_SRCS := $(SRCS) $(EXTERNAL_CPP_SRCS) $(EXTERNAL_C_SRCS)
@@ -19,10 +21,12 @@ OBJ_SRCS := $(SRCS:.cpp=.o) \
 	$(EXTERNAL_CPP_SRCS:.cpp=.o) \
 	$(EXTERNAL_C_SRCS:.c=.o)
 OBJS := $(patsubst %,$(BUILD_DIR)/%,$(OBJ_SRCS))
+DEPS := $(OBJS:.o=.d)
 
 CFLAGS := -Wall -Wextra -Wpedantic \
 	-std=c++20 \
 	-I./external/imgui -I./external/imgui/backends \
+	-I./external/imnodes \
 	-I./external/glad/include
 # extra flags
 # -DASK_FOR_HIGH_PERFORMANCE_GPU
@@ -43,15 +47,14 @@ run: $(TARGET)
 
 $(BUILD_DIR)/%.o: %.cpp
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
-
-$(BUILD_DIR)/%.o: %.cpp
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
 $(BUILD_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
 clean:
 	rm -rf $(BUILD_DIR)
+
+# Include dependency files
+-include $(DEPS)
