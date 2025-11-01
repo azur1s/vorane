@@ -85,6 +85,20 @@ inline std::string format_bytes(size_t bytes) {
   return std::format("{:.2f} {}", count, suffixes[s]);
 }
 
+void separator(float width, float height = 1.0f) {
+  ImDrawList* drawList = ImGui::GetWindowDrawList();
+
+  ImVec2 p = ImGui::GetCursorScreenPos();
+  drawList->AddLine(
+    ImVec2(p.x, p.y + 0.5f),
+    ImVec2(p.x + width, p.y + 0.5f),
+    ImGui::GetColorU32(ImGuiCol_Border)
+  );
+
+  // Add a dummy item to account for the height of the separator
+  ImGui::Dummy(ImVec2(width, height));
+}
+
 #define LOG_INFO(fmt, ...)  fprintf(stdout, "[INFO] "  fmt "\n", ##__VA_ARGS__)
 #define LOG_WARN(fmt, ...)  fprintf(stderr, "[WARN] "  fmt "\n", ##__VA_ARGS__)
 #define LOG_ERROR(fmt, ...) fprintf(stderr, "[ERROR] " fmt "\n", ##__VA_ARGS__)

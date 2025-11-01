@@ -39,6 +39,12 @@ extern "C" {
   v[2] = c; \
   v[3] = d;
 
+struct Link {
+  int id;
+  int start_attr; // output attribute id
+  int end_attr;   // input attribute id
+};
+
 struct State {
   int canvas_w = 0; // init later
   int canvas_h = 0;
@@ -46,6 +52,9 @@ struct State {
   int next_op_id = 0;
   std::vector<std::unique_ptr<Op>> ops;
   int output_node_id = -1;
+
+  std::vector<Link> links;
+  int next_link_id = 0;
 
   float zoom_factor   = 1.0f;
   float last_mouse_x  = 0.0f;
@@ -73,6 +82,25 @@ struct State {
     pong.create(canvas_w, canvas_h);
   }
 
+  void create_link(int start_attr, int end_attr) {
+    Link link;
+    link.id = next_link_id++;
+    link.start_attr = start_attr;
+    link.end_attr = end_attr;
+    links.push_back(link);
+  }
+
+  void remove_link(int link_id) {
+    links.erase(
+      std::remove_if(
+        links.begin(),
+        links.end(),
+        [link_id](const Link& link) { return link.id == link_id; }
+      ),
+      links.end()
+    );
+  }
+
   void register_op(std::unique_ptr<Op> op) {
     op->id = next_op_id++;
     if (op->get_type_name() == std::string("const/output")) {
@@ -92,6 +120,10 @@ struct State {
   }
 
   void unregister_op(int id) {
+    if (output_node_id == id) {
+      output_node_id = -1;
+    }
+
     ops.erase(
       std::remove_if(
         ops.begin(),
@@ -189,11 +221,16 @@ int main() {
   ImGui::CreateContext();
   ImGuiIO &io = ImGui::GetIO(); (void)io;
   SetupImGuiStyle();
-  io.IniFilename = NULL;
-  // ImGui::LoadIniSettingsFromDisk("./imgui.ini");
-  io.ConfigFlags |=
-      ImGuiConfigFlags_NavEnableKeyboard; // Enable Keyboard Controls
+  // io.IniFilename = NULL;
+  ImGui::LoadIniSettingsFromDisk("./imgui.ini");
+  io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard; // Enable Keyboard Controls
+  io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;     // Enable Docking
   io.Fonts->AddFontFromFileTTF("./assets/geistmono.ttf", 14.0f);
+
+  ImNodes::CreateContext();
+  ImNodes::StyleColorsDark();
+  ImNodesIO& imnodes_io = ImNodes::GetIO();
+  imnodes_io.LinkDetachWithModifierClick.Modifier = &ImGui::GetIO().KeyCtrl;
 
   ImGui_ImplGlfw_InitForOpenGL(window, true);
   ImGui_ImplOpenGL3_Init("#version 330");
@@ -211,6 +248,7 @@ int main() {
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
+    ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport(), ImGuiDockNodeFlags_PassthruCentralNode);
 
     int display_w, display_h;
     glfwGetFramebufferSize(window, &display_w, &display_h);
@@ -232,8 +270,8 @@ int main() {
     if (io.MouseDown[0] && !io.WantCaptureMouse) {
       float dx = io.MousePos.x - g_state.last_mouse_x;
       float dy = io.MousePos.y - g_state.last_mouse_y;
-      g_state.pan_x += dx * 0.5f;
-      g_state.pan_y += dy * 0.5f;
+      g_state.pan_x += dx;
+      g_state.pan_y += dy;
     }
     g_state.last_mouse_x = io.MousePos.x;
     g_state.last_mouse_y = io.MousePos.y;
@@ -242,7 +280,7 @@ int main() {
       g_state.isconfirm_exit = true;
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_E) && !io.WantCaptureKeyboard) {
+    if (ImGui::IsKeyPressed(ImGuiKey_Tab)) {
       g_state.isopen_editor = !g_state.isopen_editor;
     }
 
@@ -278,8 +316,8 @@ int main() {
       hn = aspect_window / aspect_canvas;
     }
 
-    float offx = (1.0 - wn) * 0.5f + (g_state.pan_x / (float)io.DisplaySize.x) * 2.0f;
-    float offy = (1.0 - hn) * 0.5f - (g_state.pan_y / (float)io.DisplaySize.y) * 2.0f;
+    float offx = g_state.pan_x / (float)display_w * 2.0f;
+    float offy = -g_state.pan_y / (float)display_h * 2.0f;
     float zoom = g_state.zoom_factor;
 
     float sx = wn * zoom;
@@ -313,7 +351,7 @@ int main() {
         ImGui::EndMenu();
       }
       if (ImGui::BeginMenu("view")) {
-        if (ImGui::MenuItem("editor", "E", g_state.isopen_editor)) {
+        if (ImGui::MenuItem("editor", "Tab", g_state.isopen_editor)) {
           g_state.isopen_editor = !g_state.isopen_editor;
         }
         ImGui::EndMenu();
@@ -344,139 +382,234 @@ int main() {
 
     // editor
     float margin = 10.0f;
+
     if (g_state.isopen_editor) {
-      float window_width = io.DisplaySize.x * 0.25f;
-      ImGui::SetNextWindowSize(
-        ImVec2(window_width, io.DisplaySize.y - 20.0f - (margin * 2.0f)),
-        ImGuiCond_FirstUseEver
-      );
-      ImGui::SetNextWindowPos(
-        ImVec2(io.DisplaySize.x - window_width - margin, 20.0f + margin),
-        ImGuiCond_FirstUseEver
-      );
+      ImGui::Begin("editor", &g_state.isopen_editor, ImGuiWindowFlags_NoCollapse);
+      ImNodes::BeginNodeEditor();
 
-      ImGui::Begin("editor", &g_state.isopen_editor);
+      // context menu
+      {
+        const bool open_popup = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)
+          && ImNodes::IsEditorHovered()
+          && ImGui::IsMouseClicked(ImGuiMouseButton_Right);
 
-      if (ImGui::BeginCombo("add operation", "...")) {
-        #define CHECK_PROG_ID_AND_PUSH(op) \
-          if (!op.prog_id) { \
-            LOG_ERROR("Failed to create shader for %s", op.get_type_name()); \
-          } else { \
-            g_state.register_op(std::make_unique<decltype(op)>(op)); \
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.f, 8.f));
+
+        if (!ImGui::IsAnyItemHovered() && open_popup) {
+          ImGui::OpenPopup("add op");
+        }
+
+        if (ImGui::BeginPopup("add op")) {
+          const ImVec2 click_pos = ImGui::GetMousePosOnOpeningCurrentPopup();
+
+          #define CHECK_PROG_ID_AND_PUSH(op) \
+            if (!op.prog_id) { \
+              LOG_ERROR("Failed to create shader for %s", op.get_type_name()); \
+            } else { \
+              g_state.register_op(std::make_unique<decltype(op)>(op)); \
+              ImNodes::SetNodeScreenSpacePos( \
+                g_state.next_op_id - 1, \
+                click_pos \
+              ); \
+            }
+
+          bool over_limit = g_state.ops.size() >= 65535;
+          if (ImGui::MenuItem("const/color") && !over_limit) {
+            OpConstColor op; CHECK_PROG_ID_AND_PUSH(op);
           }
+          if (ImGui::MenuItem("const/image") && !over_limit) {
+            OpConstImage op(""); CHECK_PROG_ID_AND_PUSH(op);
+          }
+          if (ImGui::MenuItem("gen/composite") && !over_limit) {
+            OpGenComposite op; CHECK_PROG_ID_AND_PUSH(op);
+          }
+          if (ImGui::MenuItem("gen/transform") && !over_limit) {
+            OpGenTransform op; CHECK_PROG_ID_AND_PUSH(op);
+          }
+          ImGui::EndPopup();
+        }
 
-        if (ImGui::Selectable("const/color")) {
-          OpConstColor op; CHECK_PROG_ID_AND_PUSH(op);
-        }
-        if (ImGui::Selectable("const/image")) {
-          OpConstImage op(""); CHECK_PROG_ID_AND_PUSH(op);
-        }
-        if (ImGui::Selectable("gen/composite")) {
-          OpGenComposite op; CHECK_PROG_ID_AND_PUSH(op);
-        }
-        if (ImGui::Selectable("gen/transform")) {
-          OpGenTransform op; CHECK_PROG_ID_AND_PUSH(op);
-        }
-        ImGui::EndCombo();
+        ImGui::PopStyleVar();
       }
 
-      ImGui::Separator();
-
-      ImGui::Text("operations:");
-
       for (size_t i = 0; i < g_state.ops.size(); i++) {
-        Op &operation = *(g_state.ops[i]);
-        const char *type_name = operation.get_type_name();
+        Op &op = *(g_state.ops[i]);
+        size_t input_count = op.input_names.size();
 
-        const char *header = std::format(
-          "{} - {}{}", operation.id, type_name, operation.bypass ? " (bypassed)" : ""
-        ).c_str();
+        // node rendering
+        // we can deterministically generate attribute/link ids based on op.id
+        // by convention:
+        //   [0000 0000 0000 0000 0000 0000 0000 0000] (rightmost are LSB)
+        //    unused  | |       | |-----------------| unique per attribute (op.id)
+        //            | |-------| input/output attribute ID (max of 255 per op)
+        //            | input/output
+        // this means that we can have up to 65535 ops before collisions occur
+        // we do this because we don't want to clutter Op's struct with extra IDs
+        // for input/output attribute IDs
+        // let's see if this will scale well enough...
 
-        ImGui::SetNextItemOpen(true, ImGuiCond_Once);
+        #define U 16 // bits for op id
+        // decode node ID by masking out lower U bits and &ing with the ID
+        #define DECODE_NODE_ID(op_id) (op_id & ((1u << U) - 1u))
+        // decode attribute ID by shifting right U bits and &ing with 0xFF (8 bits)
+        #define DECODE_ATTR_ID(op_id) ((op_id >> U) & 0xFFu)
+        #define DECODE_IO(op_id) ((op_id >> (U + 8)) & 0x1u) // 0=input, 1=output
 
-        if (ImGui::CollapsingHeader(header)) {
-          ImGui::Indent();
-          if (ImGui::Button(format_id("set as output", i))) {
-            g_state.output_node_id = g_state.ops[i]->id;
-            LOG_INFO("Set operation %d as output node", g_state.ops[i]->id);
+        #define ENCODE_ATTR_ID(op_id, attr_id, is_output) \
+          (op_id | ((attr_id & 0xFFu) << U) | ((is_output & 0x1u) << (U + 8)))
+
+
+        {
+          ImNodes::BeginNode(op.id);
+
+          ImNodes::BeginNodeTitleBar();
+          ImGui::TextUnformatted(std::format(
+            "{}{}", op.get_type_name(), op.bypass ? " (bypassed)" : ""
+          ).c_str());
+          ImNodes::EndNodeTitleBar();
+
+          for (size_t j = 0; j < input_count; j++) {
+            ImNodes::BeginInputAttribute(ENCODE_ATTR_ID(op.id, (int)j, 0));
+            const char *label = op.input_names[j];
+            ImGui::TextUnformatted(label);
+
+            ImNodes::EndInputAttribute();
           }
-          if (ImGui::Button(format_id("bypass", i))) {
-            g_state.ops[i]->bypass = !g_state.ops[i]->bypass;
+
+          ImNodes::BeginOutputAttribute(ENCODE_ATTR_ID(op.id, 0, 1));
+          ImGui::TextUnformatted("output");
+          ImNodes::EndOutputAttribute();
+
+          separator(100.0f, 10.0f);
+          ImGui::PushItemWidth(100.0f);
+          op.ui(i);
+          ImGui::PopItemWidth();
+          separator(100.0f, 10.0f);
+
+          if (g_state.output_node_id == g_state.ops[i]->id) {
+            ImGui::BeginDisabled();
+            ImGui::Button("set as output");
+            ImGui::EndDisabled();
+          } else {
+            if (ImGui::Button(format_id("set as output", i))) {
+              g_state.output_node_id = g_state.ops[i]->id;
+              LOG_INFO("Set operation %d as output node", g_state.ops[i]->id);
+            }
           }
-          ImGui::SameLine();
-          if (ImGui::Button(format_id("remove", i))) {
-            if (g_state.output_node_id == g_state.ops[i]->id) {
+
+          ImNodes::EndNode();
+        }
+      } // for each op
+
+      for (const Link& link : g_state.links) {
+        ImNodes::Link(link.id, link.start_attr, link.end_attr);
+      }
+
+      ImNodes::EndNodeEditor();
+
+      // new links
+      {
+        int start_attr, end_attr;
+        if (ImNodes::IsLinkCreated(&start_attr, &end_attr)) {
+          int start_op_id = DECODE_NODE_ID(start_attr);
+          int end_op_id = DECODE_NODE_ID(end_attr);
+          int end_input_idx = DECODE_ATTR_ID(end_attr);
+
+          std::unique_ptr<Op>& end_op = g_state.get_op_by_id(end_op_id);
+          if (end_op) {
+            if (end_input_idx < end_op->input_names.size()) {
+              end_op->input_ids[end_input_idx] = start_op_id;
+              g_state.create_link(start_attr, end_attr);
+              LOG_INFO("Created link from op %d to input index %d of op %d",
+                       start_op_id, end_input_idx, end_op_id);
+            } else {
+              LOG_WARN("Input index %d out of range for op id=%d",
+                       end_input_idx, end_op_id);
+            }
+          }
+        }
+      }
+
+      // delete links
+      {
+        const int num_selected = ImNodes::NumSelectedLinks();
+        if (num_selected > 0 && ImGui::IsKeyPressed(ImGuiKey_Backspace)) {
+          static std::vector<int> selected_links;
+          selected_links.resize(num_selected);
+          ImNodes::GetSelectedLinks(selected_links.data());
+          for (const int link_id : selected_links) {
+            LOG_INFO("Deleting link id=%d", link_id);
+            // find which op's input_ids to clear
+            auto it = std::find_if(
+              g_state.links.begin(),
+              g_state.links.end(),
+              [link_id](const Link& link) { return link.id == link_id; }
+            );
+            if (it != g_state.links.end()) {
+              // clear the corresponding input_id in the end op
+              int end_attr = it->end_attr;
+              int end_op_id = DECODE_NODE_ID(end_attr);
+              int end_input_idx = DECODE_ATTR_ID(end_attr);
+
+              std::unique_ptr<Op>& end_op = g_state.get_op_by_id(end_op_id);
+              if (end_op) {
+                LOG_INFO("Clearing input index %d of op id=%d",
+                        end_input_idx, end_op_id);
+                if (end_input_idx < end_op->input_names.size()) {
+                  end_op->input_ids[end_input_idx] = -1;
+                }
+              }
+            } else {
+              LOG_WARN("Link id=%d not found in state", link_id);
+            }
+
+            g_state.remove_link(link_id);
+          }
+        }
+      }
+
+      // delete nodes
+      {
+        const int num_selected = ImNodes::NumSelectedNodes();
+        if (num_selected > 0 && ImGui::IsKeyPressed(ImGuiKey_Backspace)) {
+          static std::vector<int> selected_nodes;
+          selected_nodes.resize(num_selected);
+          ImNodes::GetSelectedNodes(selected_nodes.data());
+          for (const int node_id : selected_nodes) {
+            LOG_INFO("Deleting node id=%d", node_id);
+            // remove associated links
+            g_state.links.erase(
+              std::remove_if(
+                g_state.links.begin(),
+                g_state.links.end(),
+                [node_id](const Link& link) {
+                  int start_op_id = DECODE_NODE_ID(link.start_attr);
+                  int end_op_id = DECODE_NODE_ID(link.end_attr);
+                  return start_op_id == node_id || end_op_id == node_id;
+                }
+              ),
+              g_state.links.end()
+            );
+            // remove the node
+            g_state.unregister_op(node_id);
+            // clear output node if needed
+            if (g_state.output_node_id == node_id) {
               g_state.output_node_id = -1;
             }
-
-            g_state.unregister_op(g_state.ops[i]->id);
-            i--;
-            continue;
           }
-          ImGui::SameLine();
-          if (ImGui::Button(format_id("move up", i)) && i > 0) {
-            std::swap(g_state.ops[i], g_state.ops[i - 1]);
-            continue;
-          }
-          ImGui::SameLine();
-          if (ImGui::Button(format_id("move down", i)) && i + 1 < g_state.ops.size()) {
-            std::swap(g_state.ops[i], g_state.ops[i + 1]);
-            continue;
-          }
-
-          ImGui::Spacing();
-
-          // inputs
-          if (ImGui::Button(format_id("add input", i))) {
-            g_state.ops[i]->input_ids.push_back(-1);
-          }
-
-          for (size_t j = 0; j < operation.input_ids.size(); j++) {
-            ImGui::PushID(j);
-            ImGui::Text("input %d:", (int)j);
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(60.0f);
-            ImGui::InputInt(
-              format_id("##input_id", i),
-              &operation.input_ids[j]
-            );
-            ImGui::SameLine();
-            if (ImGui::Button(format_id("remove input", i))) {
-              operation.input_ids.erase(operation.input_ids.begin() + j);
-              ImGui::PopID();
-              j--;
-              continue;
-            }
-            ImGui::PopID();
-          }
-
-          operation.ui(i);
-
-          ImGui::Unindent();
         }
       }
 
       ImGui::End();
 
-      // profiler window
-      ImGui::SetNextWindowSize(
-        ImVec2(200.0f, 100.0f),
-        ImGuiCond_FirstUseEver
-      );
-      ImGui::SetNextWindowPos(
-        ImVec2(margin, 20.0f + margin),
-        ImGuiCond_FirstUseEver
-      );
-      GLint vp[4]; glGetIntegerv(GL_VIEWPORT, vp);
       ImGui::Begin("profiler", nullptr, ImGuiWindowFlags_NoCollapse);
-      ImGui::Text("viewport: (%d, %d) %d x %d", vp[0], vp[1], vp[2], vp[3]);
       ImGui::Text("canvas: %d x %d", g_state.canvas_w, g_state.canvas_h);
       ImGui::Text("mem: %s", format_bytes(get_mem_usage()).c_str());
       ImGui::Text("fps: %.1f", io.Framerate);
       ImGui::Text("zoom: %.2f%%", g_state.zoom_factor * 100.0f);
       ImGui::Text("pan: (%.1f, %.1f)", g_state.pan_x, g_state.pan_y);
       ImGui::End();
-    }
+    } // if editor open 
 
     ImGui::PopFont();
     ImGui::Render();
@@ -488,6 +621,7 @@ int main() {
 
   ImGui_ImplOpenGL3_Shutdown();
   ImGui_ImplGlfw_Shutdown();
+  ImNodes::DestroyContext();
   ImGui::DestroyContext();
   glfwDestroyWindow(window);
   glfwTerminate();

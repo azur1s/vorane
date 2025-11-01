@@ -27,6 +27,7 @@ enum class MixType {
 struct Op {
   // graph-related fields
   int id = -1; // assigned by state
+  std::vector<const char*> input_names; // list of input names
   std::vector<int> input_ids; // ids of input ops
   bool dirty = true; // whether the op needs to be re-evaluated
   FBO layer_fbo; // op result stored here
@@ -75,9 +76,10 @@ struct OpConstColor : public Op {
   }
 
   void ui(int i) override {
-    ImGui::ColorEdit4(
+    ImGui::ColorPicker4(
       format_id("color", i),
-      color
+      color,
+      ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_NoSmallPreview
     );
   }
 };
@@ -163,6 +165,8 @@ struct OpGenComposite : public Op {
 
   OpGenComposite() {
     prog_id = make_fullscreen_program("shaders/gen/composite.frag");
+    input_names = { "base texture", "layer texture" };
+    input_ids = { -1, -1 };
   }
 
   void apply(const std::vector<GLuint>& input_textures, int out_w, int out_h) override {
@@ -239,6 +243,8 @@ struct OpGenTransform : public Op {
 
   OpGenTransform() {
     prog_id = make_fullscreen_program("shaders/gen/transform.frag");
+    input_names = { "texture" };
+    input_ids = { -1 };
   }
 
   void apply(const std::vector<GLuint>& input_textures, int out_w, int out_h) override {
