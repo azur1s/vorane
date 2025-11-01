@@ -32,6 +32,7 @@ extern "C" {
 #include "shader.hpp"
 #include "style.hpp"
 #include "utils.hpp"
+#include "fonts/geist_mono.h"
 
 #define INIT_FLOAT4(v, a, b, c, d) \
   v[0] = a; \
@@ -225,7 +226,11 @@ int main() {
   ImGui::LoadIniSettingsFromDisk("./imgui.ini");
   io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard; // Enable Keyboard Controls
   io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;     // Enable Docking
-  io.Fonts->AddFontFromFileTTF("./assets/geistmono.ttf", 14.0f);
+  io.Fonts->AddFontFromMemoryCompressedTTF(
+    geist_mono_compressed_data,
+    geist_mono_compressed_size,
+    14.0f
+  );
 
   ImNodes::CreateContext();
   ImNodes::StyleColorsDark();
@@ -276,7 +281,7 @@ int main() {
     g_state.last_mouse_x = io.MousePos.x;
     g_state.last_mouse_y = io.MousePos.y;
 
-    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_W)) {
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Q)) {
       g_state.isconfirm_exit = true;
     }
 
@@ -345,7 +350,7 @@ int main() {
     // menu bar
     if (ImGui::BeginMainMenuBar()) {
       if (ImGui::BeginMenu("file")) {
-        if (ImGui::MenuItem("exit", "C-W")) {
+        if (ImGui::MenuItem("exit", "C-Q")) {
           g_state.isconfirm_exit = true;
         }
         ImGui::EndMenu();
@@ -381,8 +386,6 @@ int main() {
     }
 
     // editor
-    float margin = 10.0f;
-
     if (g_state.isopen_editor) {
       ImGui::Begin("editor", &g_state.isopen_editor, ImGuiWindowFlags_NoCollapse);
       ImNodes::BeginNodeEditor();
@@ -517,7 +520,7 @@ int main() {
 
           std::unique_ptr<Op>& end_op = g_state.get_op_by_id(end_op_id);
           if (end_op) {
-            if (end_input_idx < end_op->input_names.size()) {
+            if (static_cast<size_t>(end_input_idx) < end_op->input_names.size()) {
               end_op->input_ids[end_input_idx] = start_op_id;
               g_state.create_link(start_attr, end_attr);
               LOG_INFO("Created link from op %d to input index %d of op %d",
@@ -555,7 +558,7 @@ int main() {
               if (end_op) {
                 LOG_INFO("Clearing input index %d of op id=%d",
                         end_input_idx, end_op_id);
-                if (end_input_idx < end_op->input_names.size()) {
+                if (static_cast<size_t>(end_input_idx) < end_op->input_names.size()) {
                   end_op->input_ids[end_input_idx] = -1;
                 }
               }
