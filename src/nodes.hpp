@@ -32,27 +32,44 @@ struct Op {
   bool dirty = true; // whether the op needs to be re-evaluated
   FBO layer_fbo; // op result stored here
 
+  // texture fields
   GLuint prog_id = 0;
   bool bypass = false;
+  int out_w = 512;
+  int out_h = 512;
+  bool use_input_size = true;
+  // TODO you have to resize to see the filter_mode update
+  GLenum filter_mode = GL_LINEAR;
+
+  // override output size to input size if set
+  void apply_input_size(int input_w, int input_h) {
+    if (use_input_size && input_w > 0 && input_h > 0) {
+      out_w = input_w;
+      out_h = input_h;
+    }
+  }
 
   // call this before applying the op
   void ensure_layer_fbo(int w, int h) {
-    if (layer_fbo.tex.id == 0 || layer_fbo.tex.w != w || layer_fbo.tex.h != h) {
+    if (layer_fbo.tex.id == 0
+      || layer_fbo.tex.w != w
+      || layer_fbo.tex.h != h
+    ) {
       if (layer_fbo.tex.id != 0) {
         glDeleteTextures(1, &layer_fbo.tex.id);
         glDeleteFramebuffers(1, &layer_fbo.fbo_id);
       }
-      layer_fbo.tex.createRGBA8(w, h);
       layer_fbo.create(w, h);
+      layer_fbo.tex.set_filter_mode(filter_mode);
     }
   }
 
   virtual ~Op() = default;
   virtual char const* get_type_name() const = 0;
   virtual void apply(
-    const std::vector<GLuint>& /* input_textures */,
-    int /* out_w */,
-    int /* out_h */
+    const std::vector<GLuint>&, /* input_textures */
+    int /* input_w */,
+    int /* input_h */
   ) {}
   // passes index or any unique id for ImGui element ids
   virtual void ui(int) {}
@@ -64,9 +81,10 @@ struct OpConstColor : public Op {
 
   OpConstColor() {
     prog_id = make_fullscreen_program("shaders/const/color.frag");
+    use_input_size = false;
   }
 
-  void apply(const std::vector<GLuint>&, int out_w, int out_h) override {
+  void apply(const std::vector<GLuint>& input_textures, int, int) override {
     ensure_layer_fbo(out_w, out_h);
 
     glBindFramebuffer(GL_FRAMEBUFFER, layer_fbo.fbo_id);
@@ -95,6 +113,7 @@ struct OpConstImage : public Op {
   OpConstImage(std::string path) : image_path(std::move(path)) {
     prog_id = make_fullscreen_program("shaders/const/image.frag");
     if (!path.empty()) load_image();
+    use_input_size = false;
   }
 
   ~OpConstImage() override {
@@ -126,13 +145,14 @@ struct OpConstImage : public Op {
     want_reload = false;
   }
 
-  void apply(const std::vector<GLuint>&, int out_w, int out_h) override {
+  void apply(const std::vector<GLuint>&, int, int) override {
     if (want_reload) {
       load_image();
       want_reload = false;
     }
     if (tex_id == 0) { return; }
 
+    apply_input_size(tex_w, tex_h);
     ensure_layer_fbo(out_w, out_h);
 
     glBindFramebuffer(GL_FRAMEBUFFER, layer_fbo.fbo_id);
@@ -170,7 +190,7 @@ struct OpGenComposite : public Op {
     input_ids = { -1, -1 };
   }
 
-  void apply(const std::vector<GLuint>& input_textures, int out_w, int out_h) override {
+  void apply(const std::vector<GLuint>& input_textures, int input_w, int input_h) override {
     if (input_textures.size() < 2) { return; }
     GLuint base_tex_id  = input_textures[0];
     GLuint layer_tex_id = input_textures[1];
@@ -248,11 +268,12 @@ struct OpGenTransform : public Op {
     input_ids = { -1 };
   }
 
-  void apply(const std::vector<GLuint>& input_textures, int out_w, int out_h) override {
+  void apply(const std::vector<GLuint>& input_textures, int input_w, int input_h) override {
     GLuint base_tex_id = 0;
     if (input_textures.empty()) { return; }
     base_tex_id = input_textures[0];
 
+    apply_input_size(input_w, input_h);
     ensure_layer_fbo(out_w, out_h);
 
     glBindFramebuffer(GL_FRAMEBUFFER, layer_fbo.fbo_id);
@@ -350,10 +371,11 @@ struct OpGenGrade : public Op {
     input_ids = { -1 };
   }
 
-  void apply(const std::vector<GLuint>& input_textures, int out_w, int out_h) override {
+  void apply(const std::vector<GLuint>& input_textures, int input_w, int input_h) override {
     if (input_textures.empty()) { return; }
     GLuint base_tex_id = input_textures[0];
 
+    apply_input_size(input_w, input_h);
     ensure_layer_fbo(out_w, out_h);
 
     glBindFramebuffer(GL_FRAMEBUFFER, layer_fbo.fbo_id);
@@ -417,10 +439,11 @@ struct OpGenGrayscale : public Op {
     input_ids = { -1 };
   }
 
-  void apply(const std::vector<GLuint>& input_textures, int out_w, int out_h) override {
+  void apply(const std::vector<GLuint>& input_textures, int input_w, int input_h) override {
     if (input_textures.empty()) { return; }
     GLuint base_tex_id = input_textures[0];
 
+    apply_input_size(input_w, input_h);
     ensure_layer_fbo(out_w, out_h);
 
     glBindFramebuffer(GL_FRAMEBUFFER, layer_fbo.fbo_id);
@@ -452,10 +475,11 @@ struct OpEffBlur : public Op {
     input_ids = { -1 };
   }
 
-  void apply(const std::vector<GLuint>& input_textures, int out_w, int out_h) override {
+  void apply(const std::vector<GLuint>& input_textures, int input_w, int input_h) override {
     if (input_textures.empty()) { return; }
     GLuint base_tex_id = input_textures[0];
 
+    apply_input_size(input_w, input_h);
     ensure_layer_fbo(out_w, out_h);
 
     // horizontal pass
@@ -464,7 +488,6 @@ struct OpEffBlur : public Op {
         glDeleteTextures(1, &temp_fbo.tex.id);
         glDeleteFramebuffers(1, &temp_fbo.fbo_id);
       }
-      temp_fbo.tex.createRGBA8(out_w, out_h);
       temp_fbo.create(out_w, out_h);
     }
 
@@ -529,10 +552,11 @@ struct OpEffDither : public Op {
     input_ids = { -1 };
   }
 
-  void apply(const std::vector<GLuint>& input_textures, int out_w, int out_h) override {
+  void apply(const std::vector<GLuint>& input_textures, int input_w, int input_h) override {
     if (input_textures.empty()) { return; }
     GLuint base_tex_id = input_textures[0];
 
+    apply_input_size(input_w, input_h);
     ensure_layer_fbo(out_w, out_h);
 
     glBindFramebuffer(GL_FRAMEBUFFER, layer_fbo.fbo_id);

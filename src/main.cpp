@@ -47,9 +47,9 @@ struct Link {
 };
 
 struct State {
-  int canvas_w = 0; // init later
-  int canvas_h = 0;
-  FBO ping, pong;
+  FBO present_fbo;
+  int present_w = 512;
+  int present_h = 512;
   int next_op_id = 0;
   std::vector<std::unique_ptr<Op>> ops;
   int output_node_id = -1;
@@ -69,18 +69,19 @@ struct State {
   void init() {
     ops.reserve(16);
 
-    int init_w = 512, init_h = 512;
-    set_canvas_size(init_w, init_h);
+    set_present_fbo_size(present_w, present_h);
+    present_fbo.tex.set_filter_mode(GL_NEAREST);
 
     // init vao & fbos
     GLuint vao = 0;
     glGenVertexArrays(1, &vao);
     glBindVertexArray(vao);
+  }
 
-    ping.tex.createRGBA8(canvas_w, canvas_h);
-    ping.create(canvas_w, canvas_h);
-    pong.tex.createRGBA8(canvas_w, canvas_h);
-    pong.create(canvas_w, canvas_h);
+  void set_present_fbo_size(int w, int h) {
+    present_w = w;
+    present_h = h;
+    present_fbo.create(w, h);
   }
 
   void create_link(int start_attr, int end_attr) {
@@ -135,40 +136,46 @@ struct State {
     );
   }
 
-  void render(Op* op, const std::vector<GLuint>& input_textures) {
-    op->apply(
-      input_textures,
-      canvas_w,
-      canvas_h
-    );
+  void render(Op* op, const std::vector<GLuint>& input_textures, int input_w, int input_h) {
+    op->apply(input_textures, input_w, input_h);
   }
 
-  GLuint eval(int root_id) {
+  GLuint eval(int root_id, int depth = 0) {
     std::unique_ptr<Op>& root_op = get_op_by_id(root_id);
     if (!root_op) {
       return 0;
     } else {
       std::vector<GLuint> input_textures;
       input_textures.reserve(root_op->input_ids.size());
+      int input_w = 0;
+      int input_h = 0;
 
       for (int input_id : root_op->input_ids) {
         if (input_id == root_op->id) {
           LOG_WARN("Detected self-referencing input for op id=%d, skipping", root_op->id);
           continue;
         }
+        // ? this might be inefficient
+        if (input_w == 0 && input_h == 0) {
+          std::unique_ptr<Op>& input_op = get_op_by_id(input_id);
+          if (input_op) {
+            input_w = input_op->out_w;
+            input_h = input_op->out_h;
+          }
+        }
         input_textures.push_back(eval(input_id));
       }
 
-      render(root_op.get(), input_textures);
+      render(root_op.get(), input_textures, input_w, input_h);
+
+      // if root, update present size
+      if (depth == 0) {
+        present_w = root_op->out_w;
+        present_h = root_op->out_h;
+      }
+
       return root_op->layer_fbo.tex.id;
     }
-  }
-
-  void set_canvas_size(int w, int h) {
-    canvas_w = w;
-    canvas_h = h;
-    ping.resize(canvas_w, canvas_h);
-    pong.resize(canvas_w, canvas_h);
   }
 };
 static State g_state;
@@ -242,8 +249,8 @@ int main() {
 
   g_state.init();
 
-  Texture input_texture;
-  input_texture.createRGBA8(g_state.canvas_w, g_state.canvas_h);
+  Texture base_texture;
+  base_texture.create_RGBA8(g_state.present_w, g_state.present_h);
 
   GLuint display_prog = make_fullscreen_program("shaders/present.frag");
 
@@ -303,13 +310,16 @@ int main() {
 
     // --- render
 
-    GLuint final_tex = input_texture.id;
+    GLuint final_tex = base_texture.id;
     if (g_state.output_node_id >= 0) {
       final_tex = g_state.eval(g_state.output_node_id);
+    } else {
+      // fallback to default size
+      g_state.set_present_fbo_size(512, 512);
     }
 
     // scale to fit window instead of stretch
-    float aspect_canvas = (float)g_state.canvas_w / (float)g_state.canvas_h;
+    float aspect_canvas = (float)g_state.present_w / (float)g_state.present_h;
     float aspect_window = (float)io.DisplaySize.x / (float)io.DisplaySize.y;
 
     float wn = 1.0f, hn = 1.0f;
@@ -338,7 +348,7 @@ int main() {
     glBindTexture(GL_TEXTURE_2D, final_tex);
     glUniform1i(glGetUniformLocation(display_prog, "uTex"), 0);
     glUniformMatrix3fv(glGetUniformLocation(display_prog, "uXform"), 1, GL_TRUE, M.m);
-    glUniform2f(glGetUniformLocation(display_prog, "uCanvasSize"), (float)g_state.canvas_w, (float)g_state.canvas_h);
+    glUniform2f(glGetUniformLocation(display_prog, "uCanvasSize"), (float)g_state.present_w, (float)g_state.present_h);
     glUniform1f(glGetUniformLocation(display_prog, "uCheckerSize"), 32.0f * zoom);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 
@@ -494,11 +504,29 @@ int main() {
           ImGui::TextUnformatted("output");
           ImNodes::EndOutputAttribute();
 
-          separator(100.0f, 10.0f);
           ImGui::PushItemWidth(200.0f);
-          op.ui(i);
-          ImGui::PopItemWidth();
+
           separator(100.0f, 10.0f);
+          op.ui(i);
+          separator(100.0f, 10.0f);
+
+          ImGui::Checkbox(format_id("use input size", i), &op.use_input_size);
+          if (!op.use_input_size) {
+            ImGui::InputInt(format_id("width", i), &op.out_w);
+            ImGui::InputInt(format_id("height", i), &op.out_h);
+            // clamp
+            if (op.out_w < 1) op.out_w = 1;
+            if (op.out_h < 1) op.out_h = 1;
+            const char* filter_items[] = { "nearest", "linear" };
+            static int current_filter_idx = 1; // default to linear
+            if (ImGui::Combo(format_id("filter mode", i), &current_filter_idx, filter_items, IM_ARRAYSIZE(filter_items))) {
+              if (current_filter_idx == 0) {
+                op.filter_mode = GL_NEAREST;
+              } else {
+                op.filter_mode = GL_LINEAR;
+              }
+            }
+          }
 
           if (g_state.output_node_id == g_state.ops[i]->id) {
             ImGui::BeginDisabled();
@@ -510,6 +538,8 @@ int main() {
               LOG_INFO("Set operation %d as output node", g_state.ops[i]->id);
             }
           }
+
+          ImGui::PopItemWidth();
 
           ImNodes::EndNode();
         }
@@ -643,12 +673,10 @@ int main() {
 
       ImGui::Begin("profiler", nullptr, ImGuiWindowFlags_NoCollapse);
 
-      ImGui::InputInt("canvas width", &g_state.canvas_w);
-      ImGui::InputInt("canvas height", &g_state.canvas_h);  
-
       ImGui::Separator();
 
-      ImGui::Text("canvas: %d x %d", g_state.canvas_w, g_state.canvas_h);
+      ImGui::Text("output: %d x %d", g_state.present_w, g_state.present_h);
+      ImGui::Text("output tex id: %d", final_tex);
       ImGui::Text("mem: %s", format_bytes(get_mem_usage()).c_str());
       ImGui::Text("fps: %.1f", io.Framerate);
       ImGui::Text("zoom: %.2f%%", g_state.zoom_factor * 100.0f);

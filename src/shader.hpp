@@ -55,7 +55,7 @@ static std::string load_source(const char* filepath) {
 struct Texture {
   GLuint id = 0;
   int w = 0, h = 0;
-  void createRGBA8(int W, int H, const void* pixels = nullptr){
+  void create_RGBA8(int W, int H, const void* pixels = nullptr){
     w = W; h = H;
     glGenTextures(1, &id);
     glBindTexture(GL_TEXTURE_2D, id);
@@ -65,13 +65,22 @@ struct Texture {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
   }
+
+  void set_filter_mode(GLenum mode) {
+    glBindTexture(GL_TEXTURE_2D, id);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, mode);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, mode);
+  }
 };
 
 struct FBO {
   GLuint fbo_id = 0;
   Texture tex;
-  // TODO handle texture creation inside create() so we dont have to do fbo.tex.*
+
   void create(int width, int height) {
+    if (tex.id != 0) glDeleteTextures(1, &tex.id);
+    tex.create_RGBA8(width, height);
+
     glGenFramebuffers(1, &fbo_id);
     glBindFramebuffer(GL_FRAMEBUFFER, fbo_id);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex.id, 0);
@@ -81,7 +90,7 @@ struct FBO {
 
   void resize(int width, int height) {
     if (tex.id != 0) glDeleteTextures(1, &tex.id);
-    tex.createRGBA8(width, height);
+    tex.create_RGBA8(width, height);
     if (fbo_id != 0) glDeleteFramebuffers(1, &fbo_id);
     glGenFramebuffers(1, &fbo_id);
 
