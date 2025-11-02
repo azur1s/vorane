@@ -3,6 +3,8 @@
 # vorane
 Declarative compositor for image editing.
 
+![preview](./assets/preview.png)
+
 ## Build instructions
 Prerequisites:
 - C++20 compatible compiler
