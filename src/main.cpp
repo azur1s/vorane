@@ -432,8 +432,14 @@ int main() {
           if (ImGui::MenuItem("gen/grade") && !over_limit) {
             OpGenGrade op; CHECK_PROG_ID_AND_PUSH(op);
           }
+          if (ImGui::MenuItem("gen/grayscale") && !over_limit) {
+            OpGenGrayscale op; CHECK_PROG_ID_AND_PUSH(op);
+          }
           if (ImGui::MenuItem("eff/blur") && !over_limit) {
             OpEffBlur op; CHECK_PROG_ID_AND_PUSH(op);
+          }
+          if (ImGui::MenuItem("eff/dither") && !over_limit) {
+            OpEffDither op; CHECK_PROG_ID_AND_PUSH(op);
           }
           ImGui::EndPopup();
         }
