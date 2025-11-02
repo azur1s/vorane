@@ -105,9 +105,9 @@ struct OpConstImage : public Op {
     int w, h, n;
     stbi_set_flip_vertically_on_load(1);
     stbi_uc* pixels = stbi_load(image_path.c_str(), &w, &h, &n, 4);
-    if (!pixels) { 
+    if (!pixels) {
       LOG_ERROR("Failed to load image: %s", image_path.c_str());
-      return; 
+      return;
     }
 
     if (!tex_id) glGenTextures(1, &tex_id);
@@ -136,6 +136,7 @@ struct OpConstImage : public Op {
     ensure_layer_fbo(out_w, out_h);
 
     glBindFramebuffer(GL_FRAMEBUFFER, layer_fbo.fbo_id);
+    glViewport(0, 0, out_w, out_h);
     glUseProgram(prog_id);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, tex_id);
@@ -331,6 +332,159 @@ struct OpGenTransform : public Op {
     ImGui::Checkbox(
       format_id("flip vertical", i),
       &flip_vertical
+    );
+  }
+};
+
+struct OpGenGrade : public Op {
+  float lift   = 0.0f; // [-1, 1]
+  float gamma  = 1.0f; // [0.01, 3]
+  float gain   = 1.0f; // [0, 4]
+  float offset = 0.0f; // [-1, 1]
+  float strength = 1.0f; // or mix factor
+  char const* get_type_name() const override { return "gen/grade"; }
+
+  OpGenGrade() {
+    prog_id = make_fullscreen_program("shaders/gen/grade.frag");
+    input_names = { "texture" };
+    input_ids = { -1 };
+  }
+
+  void apply(const std::vector<GLuint>& input_textures, int out_w, int out_h) override {
+    if (input_textures.empty()) { return; }
+    GLuint base_tex_id = input_textures[0];
+
+    ensure_layer_fbo(out_w, out_h);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, layer_fbo.fbo_id);
+    glViewport(0, 0, out_w, out_h);
+    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glUseProgram(prog_id);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, base_tex_id);
+    glUniform1i(glGetUniformLocation(prog_id, "uTex"), 0);
+    glUniform3f(glGetUniformLocation(prog_id, "uLift"),   lift,   lift,   lift);
+    glUniform3f(glGetUniformLocation(prog_id, "uGamma"),  gamma,  gamma,  gamma);
+    glUniform3f(glGetUniformLocation(prog_id, "uGain"),   gain,   gain,   gain);
+    glUniform3f(glGetUniformLocation(prog_id, "uOffset"), offset, offset, offset);
+    glUniform1f(glGetUniformLocation(prog_id, "uStrength"), strength);
+
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+  }
+
+  void ui(int i) override {
+    ImGui::SliderFloat(
+      format_id("lift", i),
+      &lift,
+      -1.0f,
+      1.0f
+    );
+    ImGui::SliderFloat(
+      format_id("gamma", i),
+      &gamma,
+      0.01f,
+      3.0f
+    );
+    ImGui::SliderFloat(
+      format_id("gain", i),
+      &gain,
+      0.0f,
+      4.0f
+    );
+    ImGui::SliderFloat(
+      format_id("offset", i),
+      &offset,
+      -1.0f,
+      1.0f
+    );
+    ImGui::SliderFloat(
+      format_id("strength", i),
+      &strength,
+      0.0f,
+      1.0f
+    );
+  }
+};
+
+struct OpEffBlur : public Op {
+  FBO temp_fbo;
+  GLuint prog_v_id = 0; // use prog_id for horizontal pass
+  float radius_x = 5.0f;
+  float radius_y = 5.0f;
+  bool radius_uniform = true;
+  char const* get_type_name() const override { return "eff/blur"; }
+
+  OpEffBlur() {
+    prog_id   = make_fullscreen_program("shaders/eff/gaussian_h.frag");
+    prog_v_id = make_fullscreen_program("shaders/eff/gaussian_v.frag");
+    input_names = { "texture" };
+    input_ids = { -1 };
+  }
+
+  void apply(const std::vector<GLuint>& input_textures, int out_w, int out_h) override {
+    if (input_textures.empty()) { return; }
+    GLuint base_tex_id = input_textures[0];
+
+    ensure_layer_fbo(out_w, out_h);
+
+    // horizontal pass
+    if (temp_fbo.tex.id == 0 || temp_fbo.tex.w != out_w || temp_fbo.tex.h != out_h) {
+      if (temp_fbo.tex.id != 0) {
+        glDeleteTextures(1, &temp_fbo.tex.id);
+        glDeleteFramebuffers(1, &temp_fbo.fbo_id);
+      }
+      temp_fbo.tex.createRGBA8(out_w, out_h);
+      temp_fbo.create(out_w, out_h);
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, temp_fbo.fbo_id);
+    glViewport(0, 0, out_w, out_h);
+    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glUseProgram(prog_id);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, base_tex_id);
+    glUniform1i(glGetUniformLocation(prog_id, "uTex"), 0);
+    glUniform1f(glGetUniformLocation(prog_id, "uRadius"), radius_uniform ? radius_x : radius_x);
+    glUniform2f(glGetUniformLocation(prog_id, "uTexelSize"), 1.0f / out_w, 1.0f / out_h);
+
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+    // vertical pass
+    glBindFramebuffer(GL_FRAMEBUFFER, layer_fbo.fbo_id);
+    glViewport(0, 0, out_w, out_h);
+    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glUseProgram(prog_v_id);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, temp_fbo.tex.id);
+    glUniform1i(glGetUniformLocation(prog_v_id, "uTex"), 0);
+    glUniform1f(glGetUniformLocation(prog_v_id, "uRadius"), radius_uniform ? radius_x : radius_y);
+    glUniform2f(glGetUniformLocation(prog_v_id, "uTexelSize"), 1.0f / out_w, 1.0f / out_h);
+
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+  }
+
+  void ui(int i) override {
+    ImGui::SliderFloat(
+      format_id("radius x", i),
+      &radius_x,
+      0.0f,
+      100.0f
+    );
+    ImGui::SliderFloat(
+      format_id("radius y", i),
+      radius_uniform ? &radius_x : &radius_y,
+      0.0f,
+      100.0f
+    );
+    ImGui::Checkbox(
+      format_id("radius uniform", i),
+      &radius_uniform
     );
   }
 };

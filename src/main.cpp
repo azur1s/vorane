@@ -429,6 +429,12 @@ int main() {
           if (ImGui::MenuItem("gen/transform") && !over_limit) {
             OpGenTransform op; CHECK_PROG_ID_AND_PUSH(op);
           }
+          if (ImGui::MenuItem("gen/grade") && !over_limit) {
+            OpGenGrade op; CHECK_PROG_ID_AND_PUSH(op);
+          }
+          if (ImGui::MenuItem("eff/blur") && !over_limit) {
+            OpEffBlur op; CHECK_PROG_ID_AND_PUSH(op);
+          }
           ImGui::EndPopup();
         }
 
@@ -461,7 +467,6 @@ int main() {
         #define ENCODE_ATTR_ID(op_id, attr_id, is_output) \
           (op_id | ((attr_id & 0xFFu) << U) | ((is_output & 0x1u) << (U + 8)))
 
-
         {
           ImNodes::BeginNode(op.id);
 
@@ -484,7 +489,7 @@ int main() {
           ImNodes::EndOutputAttribute();
 
           separator(100.0f, 10.0f);
-          ImGui::PushItemWidth(100.0f);
+          ImGui::PushItemWidth(200.0f);
           op.ui(i);
           ImGui::PopItemWidth();
           separator(100.0f, 10.0f);
@@ -520,14 +525,39 @@ int main() {
 
           std::unique_ptr<Op>& end_op = g_state.get_op_by_id(end_op_id);
           if (end_op) {
+            // If there's an existing link targeting the same input, remove it first.
+            auto it = std::find_if(
+              g_state.links.begin(),
+              g_state.links.end(),
+              [end_attr](const Link& l) { return l.end_attr == end_attr; }
+            );
+            if (it != g_state.links.end()) {
+              int old_link_id = it->id;
+              LOG_INFO("Replacing existing link id=%d for input attr=%d", old_link_id, end_attr);
+
+              // Clear the corresponding input_id in the end op of the old link
+              int old_end_attr = it->end_attr;
+              int old_end_op_id = DECODE_NODE_ID(old_end_attr);
+              int old_end_input_idx = DECODE_ATTR_ID(old_end_attr);
+              std::unique_ptr<Op>& old_end_op = g_state.get_op_by_id(old_end_op_id);
+              if (old_end_op) {
+                if (static_cast<size_t>(old_end_input_idx) < old_end_op->input_names.size()) {
+              old_end_op->input_ids[old_end_input_idx] = -1;
+                }
+              }
+
+              g_state.remove_link(old_link_id);
+            }
+
+            // Attach the new link
             if (static_cast<size_t>(end_input_idx) < end_op->input_names.size()) {
               end_op->input_ids[end_input_idx] = start_op_id;
               g_state.create_link(start_attr, end_attr);
               LOG_INFO("Created link from op %d to input index %d of op %d",
-                       start_op_id, end_input_idx, end_op_id);
+                  start_op_id, end_input_idx, end_op_id);
             } else {
               LOG_WARN("Input index %d out of range for op id=%d",
-                       end_input_idx, end_op_id);
+                  end_input_idx, end_op_id);
             }
           }
         }
@@ -536,7 +566,7 @@ int main() {
       // delete links
       {
         const int num_selected = ImNodes::NumSelectedLinks();
-        if (num_selected > 0 && ImGui::IsKeyPressed(ImGuiKey_Backspace)) {
+        if (num_selected > 0 && ImGui::IsKeyPressed(ImGuiKey_Delete)) {
           static std::vector<int> selected_links;
           selected_links.resize(num_selected);
           ImNodes::GetSelectedLinks(selected_links.data());
@@ -574,7 +604,7 @@ int main() {
       // delete nodes
       {
         const int num_selected = ImNodes::NumSelectedNodes();
-        if (num_selected > 0 && ImGui::IsKeyPressed(ImGuiKey_Backspace)) {
+        if (num_selected > 0 && ImGui::IsKeyPressed(ImGuiKey_Delete)) {
           static std::vector<int> selected_nodes;
           selected_nodes.resize(num_selected);
           ImNodes::GetSelectedNodes(selected_nodes.data());
@@ -606,6 +636,12 @@ int main() {
       ImGui::End();
 
       ImGui::Begin("profiler", nullptr, ImGuiWindowFlags_NoCollapse);
+
+      ImGui::InputInt("canvas width", &g_state.canvas_w);
+      ImGui::InputInt("canvas height", &g_state.canvas_h);  
+
+      ImGui::Separator();
+
       ImGui::Text("canvas: %d x %d", g_state.canvas_w, g_state.canvas_h);
       ImGui::Text("mem: %s", format_bytes(get_mem_usage()).c_str());
       ImGui::Text("fps: %.1f", io.Framerate);
