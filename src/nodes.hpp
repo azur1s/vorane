@@ -39,7 +39,7 @@ struct Op {
   int out_h = 512;
   bool use_input_size = true;
   // TODO you have to resize to see the filter_mode update
-  GLenum filter_mode = GL_LINEAR;
+  GLenum filter_mode = GL_NEAREST;
 
   // override output size to input size if set
   void apply_input_size(int input_w, int input_h) {
@@ -134,8 +134,8 @@ struct OpConstImage : public Op {
 
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
 
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter_mode);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter_mode);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
@@ -195,6 +195,7 @@ struct OpGenComposite : public Op {
     GLuint base_tex_id  = input_textures[0];
     GLuint layer_tex_id = input_textures[1];
 
+    apply_input_size(input_w, input_h);
     ensure_layer_fbo(out_w, out_h);
 
     glBindFramebuffer(GL_FRAMEBUFFER, layer_fbo.fbo_id);

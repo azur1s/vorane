@@ -518,7 +518,7 @@ int main() {
             if (op.out_w < 1) op.out_w = 1;
             if (op.out_h < 1) op.out_h = 1;
             const char* filter_items[] = { "nearest", "linear" };
-            static int current_filter_idx = 1; // default to linear
+            static int current_filter_idx = 0;
             if (ImGui::Combo(format_id("filter mode", i), &current_filter_idx, filter_items, IM_ARRAYSIZE(filter_items))) {
               if (current_filter_idx == 0) {
                 op.filter_mode = GL_NEAREST;
